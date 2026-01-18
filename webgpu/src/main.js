@@ -86,7 +86,7 @@ async function init() {
   });
 
   // Lighting State
-  const lightDir = new Vector(2.0, 2.0, -1.0).unit();
+  let lightDir = new Vector(2.0, 2.0, -1.0).unit();
   const lightUniformBuffer = device.createBuffer({
     size: 16, // vec3 + padding
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -98,7 +98,6 @@ async function init() {
   updateLight();
 
   // Sphere State (Shared)
-  // center: vec3<f32>, radius: f32
   const sphereUniformBuffer = device.createBuffer({
     size: 16, 
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -115,6 +114,11 @@ async function init() {
   let radius = 0.25;
   sphere.update(center.toArray(), radius);
 
+  // Keyboard state
+  const keys = {};
+  window.addEventListener('keydown', (e) => { keys[e.key.toUpperCase()] = true; });
+  window.addEventListener('keyup', (e) => { keys[e.key.toUpperCase()] = false; });
+
   // Interaction State
   let mode = -1;
   const MODE_ORBIT_CAMERA = 1;
@@ -123,20 +127,12 @@ async function init() {
   function startDrag(x, y) {
     oldX = x;
     oldY = y;
-    
     const { projectionMatrix, viewMatrix } = getMatrices();
-    // Note: Raytracer expects matrices as Float32Arrays or compatible objects. wgpu-matrix returns Float32Arrays.
-    // Raytracer constructor: (modelview, projection, viewport)
-    // Viewport: [0, 0, width, height]
     const viewport = [0, 0, canvas.width, canvas.height];
-    
     const tracer = new Raytracer(viewMatrix, projectionMatrix, viewport);
     const ray = tracer.getRayForPixel(x * ratio, y * ratio);
-    
     const sphereHit = Raytracer.hitTestSphere(tracer.eye, ray, center, radius);
-    
     if (sphereHit) {
-      // mode = MODE_MOVE_SPHERE; // Next step
       mode = -1; 
     } else {
       mode = MODE_ORBIT_CAMERA;
@@ -158,24 +154,12 @@ async function init() {
   }
 
   canvas.addEventListener('mousedown', (e) => {
-    e.preventDefault(); // Prevent text selection etc
+    e.preventDefault();
     startDrag(e.offsetX, e.offsetY);
   });
 
   window.addEventListener('mousemove', (e) => {
-    // Handle drag even if mouse leaves canvas, but coordinates need to be relative to canvas?
-    // WebGL demo uses simple pageX/Y but logic in startDrag uses augmented event.
-    // Here we can use e.movementX/Y or track simple delta.
-    // If we use global mousemove, we need to correct coordinates if we used them for raycasting (which we do only in startDrag).
-    // In duringDrag for rotation we only use delta (x-oldX).
-    // So passing clientX/Y or pageX/Y is fine as long as consistent.
-    // But startDrag used offsetX/Y. 
-    
-    // Let's stick to canvas-relative logic or just delta logic.
-    // If I use window listener, I should probably track "isDragging" state.
     if (mode !== -1) {
-        // e.offsetX is undefined on window events usually?
-        // Let's calculate equivalent.
         const rect = canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
@@ -220,6 +204,12 @@ async function init() {
   }
 
   function render() {
+    // Logic from @webgl/main.js for L key
+    if (keys['L']) {
+        lightDir = Vector.fromAngles((90 - angleY) * Math.PI / 180, -angleX * Math.PI / 180);
+        updateLight();
+    }
+
     updateUniforms();
 
     const commandEncoder = device.createCommandEncoder();

@@ -88,6 +88,10 @@ export class Vector {
     return this;
   }
 
+  static fromAngles(theta, phi) {
+    return new Vector(Math.cos(phi) * Math.cos(theta), Math.sin(phi), Math.cos(phi) * Math.sin(theta));
+  }
+
   static fromArray(a) {
     return new Vector(a[0], a[1], a[2]);
   }
