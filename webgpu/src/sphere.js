@@ -126,13 +126,6 @@ export class Sphere {
     this.indexBuffer.unmap();
   }
 
-  createUniforms() {
-    this.sphereUniformBuffer = this.device.createBuffer({
-      size: 16, // vec3 center + f32 radius
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-  }
-
   createPipeline() {
     const shaderModule = this.device.createShaderModule({
       label: 'Sphere Shader',
@@ -155,6 +148,7 @@ export class Sphere {
         
         @binding(3) @group(0) var waterSampler : sampler;
         @binding(4) @group(0) var waterTexture : texture_2d<f32>;
+        @binding(5) @group(0) var causticTexture : texture_2d<f32>;
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
@@ -194,12 +188,19 @@ export class Sphere {
           let refractedLight = refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
           let sphereNormal = normalize(localPos);
           
-          let diffuse = max(0.0, dot(-refractedLight, sphereNormal)) * 0.5;
+          var diffuse = max(0.0, dot(-refractedLight, sphereNormal)) * 0.5;
+          
+          let waterInfo = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
+          
+          if (point.y < waterInfo.r) {
+             let causticUV = 0.75 * (point.xz - point.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
+             let caustic = textureSampleLevel(causticTexture, waterSampler, causticUV, 0.0); 
+             diffuse *= caustic.r * 4.0;
+          }
           
           color += diffuse;
           
           // Underwater tint
-          let waterInfo = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
           if (point.y < waterInfo.r) {
              let underwaterColor = vec3f(0.4, 0.9, 1.0);
              color *= underwaterColor * 1.2;
@@ -242,7 +243,7 @@ export class Sphere {
     });
   }
 
-  render(passEncoder, waterTexture, waterSampler) {
+  render(passEncoder, waterTexture, waterSampler, causticsTexture) {
     const bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -250,7 +251,8 @@ export class Sphere {
         { binding: 1, resource: { buffer: this.sphereUniformBuffer } },
         { binding: 2, resource: { buffer: this.lightUniformBuffer } },
         { binding: 3, resource: waterSampler },
-        { binding: 4, resource: waterTexture.createView() }
+        { binding: 4, resource: waterTexture.createView() },
+        { binding: 5, resource: causticsTexture.createView() }
       ]
     });
 

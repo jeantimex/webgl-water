@@ -4,7 +4,7 @@ export class Water {
     this.width = width;
     this.height = height;
     
-    // External resources for surface rendering
+    // External resources
     this.commonUniformBuffer = uniformBuffer;
     this.lightUniformBuffer = lightUniformBuffer;
     this.sphereUniformBuffer = sphereUniformBuffer;
@@ -14,10 +14,16 @@ export class Water {
     this.skySampler = skySampler;
 
     // Physics state
-    // Texture data: R=Height, G=Velocity, B=NormalX, A=NormalZ
     this.textureA = this.createTexture();
     this.textureB = this.createTexture();
     
+    // Caustics Texture (Higher res for detail)
+    this.causticsTexture = this.device.createTexture({
+      size: [1024, 1024],
+      format: 'rgba8unorm', // or rg8unorm? WebGL uses RGBA (or RGB).
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+
     this.sampler = device.createSampler({
       magFilter: 'linear',
       minFilter: 'linear',
@@ -28,10 +34,10 @@ export class Water {
     this.createPipelines();
     this.createSurfaceMesh();
     this.createSurfacePipeline();
+    this.createCausticsPipeline();
   }
 
   createTexture() {
-    // Check if float32-filterable is supported
     const format = this.device.features.has('float32-filterable') ? 'rgba32float' : 'rgba16float';
     return this.device.createTexture({
       size: [this.width, this.height],
@@ -507,6 +513,21 @@ export class Water {
             format: 'depth24plus',
         }
     });
+
+    this.surfaceBindGroup = this.device.createBindGroup({
+        layout: this.surfacePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: this.commonUniformBuffer } },
+            { binding: 1, resource: { buffer: this.lightUniformBuffer } },
+            { binding: 2, resource: { buffer: this.sphereUniformBuffer } },
+            { binding: 3, resource: this.tileSampler },
+            { binding: 4, resource: this.tileTexture.createView() },
+            { binding: 5, resource: this.sampler },
+            { binding: 6, resource: this.textureA.createView() }, // Use textureA for reading in render
+            { binding: 7, resource: this.skySampler },
+            { binding: 8, resource: this.skyTexture.createView({dimension: 'cube'}) }
+        ]
+    });
   }
 
   renderSurface(passEncoder) {
@@ -530,5 +551,193 @@ export class Water {
     passEncoder.setVertexBuffer(0, this.positionBuffer);
     passEncoder.setIndexBuffer(this.indexBuffer, 'uint32');
     passEncoder.drawIndexed(this.vertexCount);
+  }
+
+  // --- Caustics ---
+
+  createCausticsPipeline() {
+    const shaderModule = this.device.createShaderModule({
+        label: 'Caustics Shader',
+        code: `
+        struct LightUniforms {
+           direction : vec3f,
+        }
+        @binding(0) @group(0) var<uniform> light : LightUniforms;
+
+        struct SphereUniforms {
+          center : vec3f,
+          radius : f32,
+        }
+        @binding(1) @group(0) var<uniform> sphere : SphereUniforms;
+
+        @binding(2) @group(0) var waterSampler : sampler;
+        @binding(3) @group(0) var waterTexture : texture_2d<f32>;
+
+        struct VertexOutput {
+          @builtin(position) position : vec4f,
+          @location(0) oldPos : vec3f,
+          @location(1) newPos : vec3f,
+          @location(2) ray : vec3f,
+        }
+
+        fn intersectCube(origin: vec3f, ray: vec3f, cubeMin: vec3f, cubeMax: vec3f) -> vec2f {
+          let tMin = (cubeMin - origin) / ray;
+          let tMax = (cubeMax - origin) / ray;
+          let t1 = min(tMin, tMax);
+          let t2 = max(tMin, tMax);
+          let tNear = max(max(t1.x, t1.y), t1.z);
+          let tFar = min(min(t2.x, t2.y), t2.z);
+          return vec2f(tNear, tFar);
+        }
+
+        fn project(origin: vec3f, ray: vec3f, refractedLight: vec3f) -> vec3f {
+            let poolHeight = 1.0;
+            var point = origin;
+            let tcube = intersectCube(origin, ray, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
+            point += ray * tcube.y;
+            let tplane = (-point.y - 1.0) / refractedLight.y;
+            return point + refractedLight * tplane;
+        }
+
+        @vertex
+        fn vs_main(@location(0) position : vec3f) -> VertexOutput {
+          var output : VertexOutput;
+          let uv = position.xy * 0.5 + 0.5;
+          
+          let info = textureSampleLevel(waterTexture, waterSampler, uv, 0.0);
+          
+          let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - info.b*info.b - info.a*info.a)), info.a);
+          
+          let IOR_AIR = 1.0;
+          let IOR_WATER = 1.333;
+          let lightDir = normalize(light.direction);
+          
+          // Note: WebGL demo uses -light for refraction?
+          // "refract(-light, vec3(0.0, 1.0, 0.0), ...)"
+          // My lightDir is direction.
+          let refractedLight = refract(-lightDir, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
+          let ray = refract(-lightDir, normal, IOR_AIR / IOR_WATER);
+          
+          let origin = vec3f(position.x, 0.0, position.y); // Plane on XZ in WebGL? Or XY swizzled?
+          // In CreateSurfaceMesh, I pushed x, y (2s-1, 2t-1). Z=0.
+          // VS Main logic: pos = position.xzy.
+          // Caustics shader uses gl_Vertex.xzy.
+          let pos = vec3f(position.x, 0.0, position.y); // Swizzle for calculation
+          
+          output.oldPos = project(pos, refractedLight, refractedLight);
+          output.newPos = project(pos + vec3f(0.0, info.r, 0.0), ray, refractedLight);
+          output.ray = ray;
+          
+          // Map to texture space
+          // "gl_Position = vec4(0.75 * (newPos.xz + refractedLight.xz / refractedLight.y), 0.0, 1.0);"
+          let projectedPos = 0.75 * (output.newPos.xz + refractedLight.xz / refractedLight.y);
+          output.position = vec4f(projectedPos, 0.0, 1.0);
+          
+          return output;
+        }
+
+        @fragment
+        fn fs_main(@location(0) oldPos : vec3f, @location(1) newPos : vec3f, @location(2) ray : vec3f) -> @location(0) vec4f {
+            // Intensity = oldArea / newArea
+            // Use dpdx, dpdy
+            let oldArea = length(dpdx(oldPos)) * length(dpdy(oldPos));
+            let newArea = length(dpdx(newPos)) * length(dpdy(newPos));
+            
+            var intensity = oldArea / newArea * 0.2;
+            
+            // Sphere Shadow Logic (Green channel)
+            let IOR_AIR = 1.0;
+            let IOR_WATER = 1.333;
+            let lightDir = normalize(light.direction);
+            let refractedLight = refract(-lightDir, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
+            
+            let dir = (sphere.center - newPos) / sphere.radius;
+            let area = cross(dir, refractedLight);
+            var shadow = dot(area, area);
+            let dist = dot(dir, -refractedLight);
+            
+            shadow = 1.0 + (shadow - 1.0) / (0.05 + dist * 0.025);
+            shadow = clamp(1.0 / (1.0 + exp(-shadow)), 0.0, 1.0);
+            shadow = mix(1.0, shadow, clamp(dist * 2.0, 0.0, 1.0));
+            
+            // Rim shadow
+            let poolHeight = 1.0;
+            let t = intersectCube(newPos, -refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
+            intensity *= 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (newPos.y - refractedLight.y * t.y - 2.0 / 12.0)));
+            
+            return vec4f(intensity, shadow, 0.0, 1.0);
+        }
+        `
+    });
+
+    this.causticsPipeline = this.device.createRenderPipeline({
+        label: 'Caustics Pipeline',
+        layout: 'auto',
+        vertex: {
+            module: shaderModule,
+            entryPoint: 'vs_main',
+            buffers: [{
+                arrayStride: 3 * 4,
+                attributes: [{
+                    shaderLocation: 0,
+                    offset: 0,
+                    format: 'float32x3'
+                }]
+            }]
+        },
+        fragment: {
+            module: shaderModule,
+            entryPoint: 'fs_main',
+            targets: [{ 
+                format: 'rgba8unorm',
+                blend: {
+                    color: {
+                        operation: 'add',
+                        srcFactor: 'one',
+                        dstFactor: 'one',
+                    },
+                    alpha: {
+                        operation: 'add',
+                        srcFactor: 'one',
+                        dstFactor: 'one',
+                    }
+                }
+            }]
+        },
+        primitive: {
+            topology: 'triangle-list',
+        }
+    });
+  }
+
+  updateCaustics() {
+    const bindGroup = this.device.createBindGroup({
+        layout: this.causticsPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: this.lightUniformBuffer } },
+            { binding: 1, resource: { buffer: this.sphereUniformBuffer } },
+            { binding: 2, resource: this.sampler },
+            { binding: 3, resource: this.textureA.createView() }
+        ]
+    });
+
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+            view: this.causticsTexture.createView(),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 0 }
+        }]
+    });
+
+    pass.setPipeline(this.causticsPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.setVertexBuffer(0, this.positionBuffer); // Reuse surface mesh
+    pass.setIndexBuffer(this.indexBuffer, 'uint32');
+    pass.drawIndexed(this.vertexCount);
+    pass.end();
+
+    this.device.queue.submit([encoder.finish()]);
   }
 }

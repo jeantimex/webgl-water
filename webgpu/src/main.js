@@ -300,6 +300,7 @@ async function init() {
     water.stepSimulation();
     water.stepSimulation();
     water.updateNormals();
+    water.updateCaustics(); // Update Caustics
 
     updateUniforms();
 
@@ -319,9 +320,9 @@ async function init() {
       }
     });
 
-    // Pass water texture for underwater effects
-    pool.render(passEncoder, water.textureA, water.sampler);
-    sphere.render(passEncoder, water.textureA, water.sampler);
+    // Pass caustics texture to Pool and Sphere
+    pool.render(passEncoder, water.textureA, water.sampler, water.causticsTexture);
+    sphere.render(passEncoder, water.textureA, water.sampler, water.causticsTexture);
     
     water.renderSurface(passEncoder);
     

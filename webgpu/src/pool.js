@@ -94,6 +94,7 @@ export class Pool {
         
         @binding(5) @group(0) var waterSampler : sampler;
         @binding(6) @group(0) var waterTexture : texture_2d<f32>;
+        @binding(7) @group(0) var causticTexture : texture_2d<f32>; // Same sampler as water/tiles? Or use tileSampler? waterSampler is nearest/linear depending on setup. tileSampler is linear. Caustics needs linear.
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
@@ -162,21 +163,31 @@ export class Pool {
           
           let diffuse = max(0.0, dot(refractedLight, normal));
           
-          let t = intersectCube(point, refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-          let shadowFactor = 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));
+          let waterInfo = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
           
-          scale += diffuse * shadowFactor * 0.5;
-
-          // Sphere Shadow
+          if (point.y < waterInfo.r) {
+             // Underwater: Use caustics
+             // Caustics UV calculation
+             // "0.75 * (point.xz - point.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5"
+             let causticUV = 0.75 * (point.xz - point.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
+             let caustic = textureSampleLevel(causticTexture, tileSampler, causticUV, 0.0); // tileSampler is linear
+             
+             scale += diffuse * caustic.r * 2.0 * caustic.g;
+          } else {
+             // Above water: Rim shadow
+             let t = intersectCube(point, refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
+             let shadowFactor = 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));
+             scale += diffuse * shadowFactor * 0.5;
+          }
+          
+          // Sphere Shadow (Analytic) - Force usage of binding 4
           let distToSphere = intersectSphere(point, refractedLight, sphere.center, sphere.radius);
           if (distToSphere < 1.0e5) {
              scale *= 0.5; 
           }
-          
+
           var finalColor = wallColor * scale;
           
-          // Underwater tint
-          let waterInfo = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
           if (point.y < waterInfo.r) {
              let underwaterColor = vec3f(0.4, 0.9, 1.0);
              finalColor *= underwaterColor * 1.2;
@@ -219,7 +230,7 @@ export class Pool {
     });
   }
 
-  render(passEncoder, waterTexture, waterSampler) {
+  render(passEncoder, waterTexture, waterSampler, causticsTexture) {
     const bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -229,7 +240,8 @@ export class Pool {
         { binding: 3, resource: { buffer: this.lightUniformBuffer } },
         { binding: 4, resource: { buffer: this.sphereUniformBuffer } },
         { binding: 5, resource: waterSampler },
-        { binding: 6, resource: waterTexture.createView() }
+        { binding: 6, resource: waterTexture.createView() },
+        { binding: 7, resource: causticsTexture.createView() }
       ]
     });
 
