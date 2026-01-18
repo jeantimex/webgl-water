@@ -122,7 +122,10 @@ async function init() {
   // Interaction State
   let mode = -1;
   const MODE_ORBIT_CAMERA = 1;
+  const MODE_MOVE_SPHERE = 2;
   let oldX, oldY;
+  let prevHit;
+  let planeNormal;
 
   function startDrag(x, y) {
     oldX = x;
@@ -132,8 +135,12 @@ async function init() {
     const tracer = new Raytracer(viewMatrix, projectionMatrix, viewport);
     const ray = tracer.getRayForPixel(x * ratio, y * ratio);
     const sphereHit = Raytracer.hitTestSphere(tracer.eye, ray, center, radius);
+    
     if (sphereHit) {
-      mode = -1; 
+      mode = MODE_MOVE_SPHERE;
+      prevHit = sphereHit.hit;
+      // Plane perpendicular to camera look vector
+      planeNormal = tracer.getRayForPixel(canvas.width / 2, canvas.height / 2).negative();
     } else {
       mode = MODE_ORBIT_CAMERA;
     }
@@ -144,6 +151,27 @@ async function init() {
       angleY -= x - oldX;
       angleX -= y - oldY;
       angleX = Math.max(-89.999, Math.min(89.999, angleX));
+    } else if (mode === MODE_MOVE_SPHERE) {
+      const { projectionMatrix, viewMatrix } = getMatrices();
+      const viewport = [0, 0, canvas.width, canvas.height];
+      const tracer = new Raytracer(viewMatrix, projectionMatrix, viewport);
+      const ray = tracer.getRayForPixel(x * ratio, y * ratio);
+      
+      // Intersect ray with plane defined by prevHit and planeNormal
+      // t = dot(prevHit - eye, planeNormal) / dot(ray, planeNormal)
+      // or t = -dot(eye - prevHit, planeNormal) / ...
+      const t = -planeNormal.dot(tracer.eye.subtract(prevHit)) / planeNormal.dot(ray);
+      const nextHit = tracer.eye.add(ray.multiply(t));
+      
+      center = center.add(nextHit.subtract(prevHit));
+      
+      // Clamp to pool bounds
+      center.x = Math.max(radius - 1, Math.min(1 - radius, center.x));
+      center.y = Math.max(radius - 1, Math.min(10, center.y));
+      center.z = Math.max(radius - 1, Math.min(1 - radius, center.z));
+      
+      sphere.update(center.toArray(), radius);
+      prevHit = nextHit;
     }
     oldX = x;
     oldY = y;
