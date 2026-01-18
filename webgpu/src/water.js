@@ -332,9 +332,7 @@ export class Water {
   }
 
   createSurfacePipeline() {
-    const shaderModule = this.device.createShaderModule({
-        label: 'Water Surface Shader',
-        code: `
+    const shaderCode = (isUnderwater) => `
         struct CommonUniforms {
           viewProjectionMatrix : mat4x4f,
           eyePosition : vec3f,
@@ -504,28 +502,65 @@ export class Water {
             }
 
             let ba = vec2f(info.b, info.a);
-            let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
+            var normal = vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
             
             let incomingRay = normalize(worldPos - commonUniforms.eyePosition);
             
+            ${isUnderwater ? `
+            normal = -normal;
+            let reflectedRay = reflect(incomingRay, normal);
+            let refractedRay = refract(incomingRay, normal, IOR_WATER / IOR_AIR);
+            let fresnel = mix(0.5, 1.0, pow(1.0 - dot(normal, -incomingRay), 3.0));
+            
+            let reflectedColor = getSurfaceRayColor(worldPos, reflectedRay, UNDERwaterColor);
+            let refractedColor = getSurfaceRayColor(worldPos, refractedRay, vec3f(1.0)) * vec3f(0.8, 1.0, 1.1);
+            
+            let finalColor = mix(reflectedColor, refractedColor, (1.0 - fresnel) * length(refractedRay));
+            ` : `
             let reflectedRay = reflect(incomingRay, normal);
             let refractedRay = refract(incomingRay, normal, IOR_AIR / IOR_WATER);
-            
             let fresnel = mix(0.25, 1.0, pow(1.0 - dot(normal, -incomingRay), 3.0));
             
             let reflectedColor = getSurfaceRayColor(worldPos, reflectedRay, ABOVewaterColor);
             let refractedColor = getSurfaceRayColor(worldPos, refractedRay, ABOVewaterColor);
             
             let finalColor = mix(refractedColor, reflectedColor, fresnel);
+            `}
             
             return vec4f(finalColor, 1.0);
         }
-        `
+        `;
+
+    this.surfaceBindGroupLayout = this.device.createBindGroupLayout({
+      label: 'Water Surface BindGroupLayout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 5, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 6, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
+        { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      ],
     });
 
-    this.surfacePipeline = this.device.createRenderPipeline({
-        label: 'Water Surface Pipeline',
-        layout: 'auto',
+    const surfacePipelineLayout = this.device.createPipelineLayout({
+      label: 'Water Surface PipelineLayout',
+      bindGroupLayouts: [this.surfaceBindGroupLayout],
+    });
+
+    const createSurfacePipeline = (label, isUnderwater, cullMode) => {
+      const shaderModule = this.device.createShaderModule({
+        label: `${label} Shader`,
+        code: shaderCode(isUnderwater),
+      });
+
+      return this.device.createRenderPipeline({
+        label,
+        layout: surfacePipelineLayout,
         vertex: {
             module: shaderModule,
             entryPoint: 'vs_main',
@@ -545,17 +580,29 @@ export class Water {
         },
         primitive: {
             topology: 'triangle-list',
-            cullMode: 'none',
+            cullMode,
         },
         depthStencil: {
             depthWriteEnabled: true,
             depthCompare: 'less',
             format: 'depth24plus',
         }
-    });
+      });
+    };
+
+    this.surfacePipelineAbove = createSurfacePipeline(
+      'Water Surface Above Pipeline',
+      false,
+      'front'
+    );
+    this.surfacePipelineUnder = createSurfacePipeline(
+      'Water Surface Under Pipeline',
+      true,
+      'back'
+    );
 
     this.surfaceBindGroup = this.device.createBindGroup({
-        layout: this.surfacePipeline.getBindGroupLayout(0),
+        layout: this.surfaceBindGroupLayout,
         entries: [
             { binding: 0, resource: { buffer: this.commonUniformBuffer } },
             { binding: 1, resource: { buffer: this.lightUniformBuffer } },
@@ -573,7 +620,7 @@ export class Water {
 
   renderSurface(passEncoder) {
     const bindGroup = this.device.createBindGroup({
-        layout: this.surfacePipeline.getBindGroupLayout(0),
+        layout: this.surfaceBindGroupLayout,
         entries: [
             { binding: 0, resource: { buffer: this.commonUniformBuffer } },
             { binding: 1, resource: { buffer: this.lightUniformBuffer } },
@@ -588,10 +635,14 @@ export class Water {
         ]
     });
 
-    passEncoder.setPipeline(this.surfacePipeline);
+    passEncoder.setPipeline(this.surfacePipelineAbove);
     passEncoder.setBindGroup(0, bindGroup);
     passEncoder.setVertexBuffer(0, this.positionBuffer);
     passEncoder.setIndexBuffer(this.indexBuffer, 'uint32');
+    passEncoder.drawIndexed(this.vertexCount);
+
+    passEncoder.setPipeline(this.surfacePipelineUnder);
+    passEncoder.setBindGroup(0, bindGroup);
     passEncoder.drawIndexed(this.vertexCount);
   }
 
