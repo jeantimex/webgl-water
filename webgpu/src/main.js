@@ -84,11 +84,18 @@ async function init() {
   }
   updateLight();
 
+  // Sphere State (Shared)
+  // center: vec3<f32>, radius: f32
+  const sphereUniformBuffer = device.createBuffer({
+    size: 16, 
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
   // Create Pool
-  const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer);
+  const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer);
 
   // Create Sphere
-  const sphere = new Sphere(device, format, uniformBuffer, lightUniformBuffer);
+  const sphere = new Sphere(device, format, uniformBuffer, lightUniformBuffer, sphereUniformBuffer);
   
   // Initial Sphere Physics State
   let center = [-0.4, -0.75, 0.2];

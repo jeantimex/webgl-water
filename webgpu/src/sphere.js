@@ -1,14 +1,15 @@
 export class Sphere {
-  constructor(device, format, uniformBuffer, lightUniformBuffer) {
+  constructor(device, format, uniformBuffer, lightUniformBuffer, sphereUniformBuffer) {
     this.device = device;
     this.format = format;
     this.commonUniformBuffer = uniformBuffer; 
+    this.sphereUniformBuffer = sphereUniformBuffer;
 
     this.center = [0, 0, 0];
     this.radius = 1;
 
     this.createGeometry();
-    this.createUniforms();
+    // this.createUniforms(); // No longer needed
     this.createPipeline(lightUniformBuffer);
   }
 
@@ -123,13 +124,6 @@ export class Sphere {
     });
     new Uint32Array(this.indexBuffer.getMappedRange()).set(finalIndices);
     this.indexBuffer.unmap();
-  }
-
-  createUniforms() {
-    this.sphereUniformBuffer = this.device.createBuffer({
-      size: 16, // vec3 center + f32 radius
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
   }
 
   createPipeline(lightUniformBuffer) {

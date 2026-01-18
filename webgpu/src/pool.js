@@ -1,10 +1,10 @@
 export class Pool {
-  constructor(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer) {
+  constructor(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer) {
     this.device = device;
     this.format = format;
     
     this.createGeometry();
-    this.createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer);
+    this.createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer);
   }
 
   createGeometry() {
@@ -62,7 +62,7 @@ export class Pool {
     this.indexBuffer.unmap();
   }
 
-  createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer) {
+  createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer) {
     const shaderModule = this.device.createShaderModule({
       label: 'Pool Shader',
       code: `
@@ -78,6 +78,12 @@ export class Pool {
         }
         @binding(3) @group(0) var<uniform> light : LightUniforms;
 
+        struct SphereUniforms {
+          center : vec3f,
+          radius : f32,
+        }
+        @binding(4) @group(0) var<uniform> sphere : SphereUniforms;
+
         struct VertexOutput {
           @builtin(position) position : vec4f,
           @location(0) localPos : vec3f,
@@ -92,6 +98,19 @@ export class Pool {
           let tNear = max(max(t1.x, t1.y), t1.z);
           let tFar = min(min(t2.x, t2.y), t2.z);
           return vec2f(tNear, tFar);
+        }
+
+        fn intersectSphere(origin: vec3f, ray: vec3f, sphereCenter: vec3f, sphereRadius: f32) -> f32 {
+            let toSphere = origin - sphereCenter;
+            let a = dot(ray, ray);
+            let b = 2.0 * dot(toSphere, ray);
+            let c = dot(toSphere, toSphere) - sphereRadius * sphereRadius;
+            let discriminant = b*b - 4.0*a*c;
+            if (discriminant > 0.0) {
+              let t = (-b - sqrt(discriminant)) / (2.0 * a);
+              if (t > 0.0) { return t; }
+            }
+            return 1.0e6;
         }
 
         @vertex
@@ -121,25 +140,34 @@ export class Pool {
           
           let IOR_AIR = 1.0;
           let IOR_WATER = 1.333;
-          let poolHeight = 1.0; // The shader uses 1.0 implicitly in logic
+          let poolHeight = 1.0;
           
-          // Basic normal determination
           var normal = vec3f(0.0, 1.0, 0.0);
           if (abs(point.x) > 0.999) { normal = vec3f(-point.x, 0.0, 0.0); }
           else if (abs(point.z) > 0.999) { normal = vec3f(0.0, 0.0, -point.z); }
           
           var scale = 0.5;
+          // Refracted light for shadows/caustics
           let refractedLight = -refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
+          
+          // Direct light diffuse for walls (should it use refracted light or direct light?)
+          // renderer.js uses refractedLight for diffuse calc on walls.
           let diffuse = max(0.0, dot(refractedLight, normal));
           
           // Shadow for the rim of the pool
           let t = intersectCube(point, refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-          
-          // "diffuse *= 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));"
-          // In WGSL:
           let shadowFactor = 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));
           
           scale += diffuse * shadowFactor * 0.5;
+
+          // Sphere Shadow
+          // Trace ray from point towards light source (refractedLight points UP towards light)
+          
+          let distToSphere = intersectSphere(point, refractedLight, sphere.center, sphere.radius);
+          if (distToSphere < 1.0e5) {
+             // Hit sphere -> Shadow
+             scale *= 0.5; // Darken
+          }
 
           return vec4f(wallColor * scale, 1.0);
         }
@@ -183,7 +211,8 @@ export class Pool {
         { binding: 0, resource: { buffer: uniformBuffer } },
         { binding: 1, resource: tileSampler },
         { binding: 2, resource: tileTexture.createView() },
-        { binding: 3, resource: { buffer: lightUniformBuffer } }
+        { binding: 3, resource: { buffer: lightUniformBuffer } },
+        { binding: 4, resource: { buffer: sphereUniformBuffer } }
       ]
     });
   }
