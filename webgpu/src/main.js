@@ -3,6 +3,7 @@ import { Pool } from './pool.js';
 import { Sphere } from './sphere.js';
 import { Water } from './water.js';
 import { Vector, Raytracer } from './lightgl.js';
+import { Cubemap } from './cubemap.js';
 
 async function init() {
   const gpu = navigator.gpu;
@@ -70,6 +71,18 @@ async function init() {
     addressModeV: 'repeat',
   });
 
+  // Load Cubemap
+  const cubemap = new Cubemap(device);
+  const skyTexture = await cubemap.load({
+    xpos: '/xpos.jpg', xneg: '/xneg.jpg',
+    ypos: '/ypos.jpg', yneg: '/yneg.jpg',
+    zpos: '/zpos.jpg', zneg: '/zneg.jpg'
+  });
+  const skySampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+  });
+
   // Camera state
   let angleX = -25;
   let angleY = -200.5;
@@ -115,7 +128,9 @@ async function init() {
   // Create Objects
   const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer);
   const sphere = new Sphere(device, format, uniformBuffer, lightUniformBuffer, sphereUniformBuffer);
-  const water = new Water(device, 256, 256, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, tileTexture, tileSampler);
+  
+  // Pass Skybox to Water
+  const water = new Water(device, 256, 256, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, tileTexture, tileSampler, skyTexture, skySampler);
 
   // Initial Sphere Physics State
   let center = new Vector(-0.4, -0.75, 0.2);

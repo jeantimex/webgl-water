@@ -1,5 +1,5 @@
 export class Water {
-  constructor(device, width, height, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, tileTexture, tileSampler) {
+  constructor(device, width, height, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, tileTexture, tileSampler, skyTexture, skySampler) {
     this.device = device;
     this.width = width;
     this.height = height;
@@ -10,6 +10,8 @@ export class Water {
     this.sphereUniformBuffer = sphereUniformBuffer;
     this.tileTexture = tileTexture;
     this.tileSampler = tileSampler;
+    this.skyTexture = skyTexture;
+    this.skySampler = skySampler;
 
     // Physics state
     // Texture data: R=Height, G=Velocity, B=NormalX, A=NormalZ
@@ -29,14 +31,17 @@ export class Water {
   }
 
   createTexture() {
+    // Check if float32-filterable is supported
+    const format = this.device.features.has('float32-filterable') ? 'rgba32float' : 'rgba16float';
     return this.device.createTexture({
       size: [this.width, this.height],
-      format: 'rgba32float', // High precision for physics
+      format: format, 
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     });
   }
 
   createPipelines() {
+    const format = this.device.features.has('float32-filterable') ? 'rgba32float' : 'rgba16float';
     const fullscreenQuadVS = `
       struct VertexOutput {
         @builtin(position) position : vec4f,
@@ -79,7 +84,7 @@ export class Water {
         
         return info;
       }
-    `, 32); 
+    `, 32, format); 
 
     // Update Shader
     this.updatePipeline = this.createPipeline('Update', fullscreenQuadVS, `
@@ -111,7 +116,7 @@ export class Water {
         
         return info;
       }
-    `, 16); 
+    `, 16, format); 
 
     // Normal Shader
     this.normalPipeline = this.createPipeline('Normal', fullscreenQuadVS, `
@@ -139,7 +144,7 @@ export class Water {
         
         return info;
       }
-    `, 16);
+    `, 16, format);
 
     // Sphere Interaction Shader
     this.spherePipeline = this.createPipeline('Sphere', fullscreenQuadVS, `
@@ -174,10 +179,10 @@ export class Water {
         
         return info;
       }
-    `, 32); 
+    `, 32, format); 
   }
 
-  createPipeline(label, vsCode, fsCode, uniformSize) {
+  createPipeline(label, vsCode, fsCode, uniformSize, format) {
     const module = this.device.createShaderModule({
       label: label + ' Module',
       code: vsCode + fsCode
@@ -193,7 +198,7 @@ export class Water {
       fragment: {
         module: module,
         entryPoint: 'fs_main',
-        targets: [{ format: 'rgba32float' }]
+        targets: [{ format: format }]
       },
       primitive: {
         topology: 'triangle-list',
@@ -282,24 +287,15 @@ export class Water {
     const positions = [];
     const indices = [];
 
-    // Generate plane from -1 to 1 on X and Z (Y is up/down in shader logic)
-    // Vertices
+    // Generate plane from -1 to 1 on X and Z
     for (let z = 0; z <= detail; z++) {
         const t = z / detail;
         for (let x = 0; x <= detail; x++) {
             const s = x / detail;
-            // x: 2*s - 1
-            // z: 2*t - 1 (mapped to Y in WebGL plane logic? No, mesh.plane makes XY plane)
-            // renderer.js uses mesh.plane.
-            // In shader: position = gl_Vertex.xzy; position.y += info.r;
-            // So plane is on XY, swizzled to XZ.
-            // Let's create XZ plane directly or swizzle in shader.
-            // Keeping consistent with WebGL demo: Create XY plane, swizzle in shader.
             positions.push(2 * s - 1, 2 * t - 1, 0);
         }
     }
 
-    // Indices
     for (let z = 0; z < detail; z++) {
         for (let x = 0; x < detail; x++) {
             const i = x + z * (detail + 1);
@@ -354,6 +350,10 @@ export class Water {
         @binding(4) @group(0) var tileTexture : texture_2d<f32>;
         @binding(5) @group(0) var waterSampler : sampler;
         @binding(6) @group(0) var waterTexture : texture_2d<f32>;
+        
+        // Skybox
+        @binding(7) @group(0) var skySampler : sampler;
+        @binding(8) @group(0) var skyTexture : texture_cube<f32>;
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
@@ -364,16 +364,10 @@ export class Water {
         fn vs_main(@location(0) position : vec3f) -> VertexOutput {
           var output : VertexOutput;
           
-          // Get water info
-          // Map position xy (-1..1) to UV (0..1)
           let uv = position.xy * 0.5 + 0.5;
           let info = textureSampleLevel(waterTexture, waterSampler, uv, 0.0);
           
-          // Swizzle to XZ plane and add height
-          var pos = position.xzy; // x, 0, y -> x, z, y? No. X, Y, Z -> X, Z, Y.
-          // Plane is created as XY. Z is 0.
-          // In WebGL: gl_Vertex.xzy means (x, 0, y).
-          // height is info.r.
+          var pos = position.xzy; 
           pos.y = info.r;
           
           output.worldPos = pos;
@@ -382,7 +376,6 @@ export class Water {
           return output;
         }
 
-        // Raytracing helpers
         fn intersectCube(origin: vec3f, ray: vec3f, cubeMin: vec3f, cubeMax: vec3f) -> vec2f {
           let tMin = (cubeMin - origin) / ray;
           let tMax = (cubeMax - origin) / ray;
@@ -408,34 +401,18 @@ export class Water {
         
         fn getSphereColor(point: vec3f) -> vec3f {
             var color = vec3f(0.5);
-            
-            // Ambient Occlusion logic (simplified)
-            // Need sphereRadius and pool bounds?
             let sphereRadius = sphere.radius;
-            
             let dist_x = (1.0 + sphereRadius - abs(point.x)) / sphereRadius;
             let dist_z = (1.0 + sphereRadius - abs(point.z)) / sphereRadius;
             let dist_y = (point.y + 1.0 + sphereRadius) / sphereRadius;
-            
             color *= 1.0 - 0.9 / pow(max(0.1, dist_x), 3.0);
             color *= 1.0 - 0.9 / pow(max(0.1, dist_z), 3.0);
             color *= 1.0 - 0.9 / pow(max(0.1, dist_y), 3.0);
-            
-            // Basic Diffuse
-            let lightDir = normalize(light.direction); // Incoming? light struct usually has direction.
-            // My light uniform is direction vector.
-            // Sphere normal
-            let sphereNormal = normalize(point - sphere.center);
-            // Refracted light logic... let's simplify for sphere color under water
-            // Just return shading.
-            
             return color;
         }
 
         fn getWallColor(point: vec3f) -> vec3f {
             var wallColor : vec3f;
-            
-            // Planar mapping
             if (abs(point.x) > 0.999) {
                 wallColor = textureSampleLevel(tileTexture, tileSampler, point.yz * 0.5 + vec2f(1.0, 0.5), 0.0).rgb;
             } else if (abs(point.z) > 0.999) {
@@ -443,11 +420,7 @@ export class Water {
             } else {
                 wallColor = textureSampleLevel(tileTexture, tileSampler, point.xz * 0.5 + 0.5, 0.0).rgb;
             }
-            
-            // Simple shading for walls
-            var scale = 0.5;
-            // Just return wall color darker
-            return wallColor * scale;
+            return wallColor * 0.5;
         }
 
         fn getSurfaceRayColor(origin: vec3f, ray: vec3f, waterColor: vec3f) -> vec3f {
@@ -461,13 +434,12 @@ export class Water {
                 let t = intersectCube(origin, ray, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
                 color = getWallColor(origin + ray * t.y);
             } else {
-                // Sky
-                // Fake sky
-                color = vec3f(0.3, 0.5, 0.9);
-                // Sun spec
+                // Use Skybox
+                color = textureSampleLevel(skyTexture, skySampler, ray, 0.0).rgb;
+                // Add sun specular
                 let sunDir = normalize(light.direction);
                 let spec = pow(max(0.0, dot(sunDir, ray)), 5000.0);
-                color += vec3f(spec);
+                color += vec3f(spec) * vec3f(10.0, 8.0, 6.0);
             }
             
             if (ray.y < 0.0) {
@@ -483,25 +455,16 @@ export class Water {
             let abovewaterColor = vec3f(0.25, 1.0, 1.25);
             let underwaterColor = vec3f(0.4, 0.9, 1.0);
             
-            // Sample Water Texture for Normal
             let uv = worldPos.xz * 0.5 + 0.5;
             let info = textureSample(waterTexture, waterSampler, uv);
             
-            // Normal reconstruction
-            // info.b = normal.x, info.a = normal.z
-            // normal.y = sqrt(1 - x*x - z*z)
             let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - info.b*info.b - info.a*info.a)), info.a);
             
-            let viewDir = normalize(worldPos - commonUniforms.eyePosition); // View vector (Eye to Point)? 
-            // Usually Incoming Ray is (Point - Eye).
             let incomingRay = normalize(worldPos - commonUniforms.eyePosition);
             
-            // Reflection
             let reflectedRay = reflect(incomingRay, normal);
             let refractedRay = refract(incomingRay, normal, IOR_AIR / IOR_WATER);
             
-            // Fresnel
-            // mix(0.25, 1.0, pow(1.0 - dot(normal, -incomingRay), 3.0));
             let fresnel = mix(0.25, 1.0, pow(1.0 - dot(normal, -incomingRay), 3.0));
             
             let reflectedColor = getSurfaceRayColor(worldPos, reflectedRay, abovewaterColor);
@@ -536,7 +499,7 @@ export class Water {
         },
         primitive: {
             topology: 'triangle-list',
-            cullMode: 'none', // Render both sides just in case
+            cullMode: 'none',
         },
         depthStencil: {
             depthWriteEnabled: true,
@@ -544,32 +507,9 @@ export class Water {
             format: 'depth24plus',
         }
     });
-
-    this.surfaceBindGroup = this.device.createBindGroup({
-        layout: this.surfacePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: this.commonUniformBuffer } },
-            { binding: 1, resource: { buffer: this.lightUniformBuffer } },
-            { binding: 2, resource: { buffer: this.sphereUniformBuffer } },
-            { binding: 3, resource: this.tileSampler },
-            { binding: 4, resource: this.tileTexture.createView() },
-            { binding: 5, resource: this.sampler },
-            { binding: 6, resource: this.textureA.createView() } // Use textureA for reading in render
-        ]
-    });
   }
 
   renderSurface(passEncoder) {
-    // Re-create bind group if texture swapped?
-    // Simulation swaps textureA and textureB.
-    // If I bind textureA once, it points to the GPU texture object.
-    // Swapping `this.textureA` JS variable changes the reference.
-    // I need to update the bind group or have two bind groups.
-    
-    // Easier: Just create bind group every frame or update it.
-    // Creating bind group is cheap enough for now?
-    // Or cache two bind groups.
-    
     const bindGroup = this.device.createBindGroup({
         layout: this.surfacePipeline.getBindGroupLayout(0),
         entries: [
@@ -579,7 +519,9 @@ export class Water {
             { binding: 3, resource: this.tileSampler },
             { binding: 4, resource: this.tileTexture.createView() },
             { binding: 5, resource: this.sampler },
-            { binding: 6, resource: this.textureA.createView() }
+            { binding: 6, resource: this.textureA.createView() },
+            { binding: 7, resource: this.skySampler },
+            { binding: 8, resource: this.skyTexture.createView({dimension: 'cube'}) }
         ]
     });
 
