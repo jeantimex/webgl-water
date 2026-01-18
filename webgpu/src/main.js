@@ -1,5 +1,6 @@
 import { mat4, vec3 } from 'wgpu-matrix';
 import { Pool } from './pool.js';
+import { Sphere } from './sphere.js';
 
 async function init() {
   const gpu = navigator.gpu;
@@ -63,7 +64,7 @@ async function init() {
   let angleX = -25;
   let angleY = -200.5;
 
-  // Uniform Buffer (Matrices)
+  // Uniform Buffer (Matrices) - Shared ViewProjection
   const uniformBufferSize = 4 * 16; // 4x4 matrix
   const uniformBuffer = device.createBuffer({
     size: uniformBufferSize,
@@ -72,6 +73,14 @@ async function init() {
 
   // Create Pool
   const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler);
+
+  // Create Sphere
+  const sphere = new Sphere(device, format, uniformBuffer);
+  
+  // Initial Sphere Physics State
+  let center = [-0.4, -0.75, 0.2];
+  let radius = 0.25;
+  sphere.update(center, radius);
 
   // Depth Texture
   let depthTexture;
@@ -108,9 +117,9 @@ async function init() {
     mat4.rotateY(viewMatrix, -angleY * Math.PI / 180, viewMatrix);
     mat4.translate(viewMatrix, [0, 0.5, 0], viewMatrix);
 
-    const mvpMatrix = mat4.multiply(projectionMatrix, viewMatrix);
+    const viewProjectionMatrix = mat4.multiply(projectionMatrix, viewMatrix);
     
-    device.queue.writeBuffer(uniformBuffer, 0, mvpMatrix);
+    device.queue.writeBuffer(uniformBuffer, 0, viewProjectionMatrix);
   }
 
   function render() {
@@ -133,6 +142,7 @@ async function init() {
     });
 
     pool.render(passEncoder);
+    sphere.render(passEncoder);
     
     passEncoder.end();
 
