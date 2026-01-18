@@ -39,6 +39,7 @@ async function init() {
 
   const help = document.getElementById('help');
   const ratio = window.devicePixelRatio || 1;
+  let prevTime = performance.now();
 
   // Load Texture
   async function loadTexture(url) {
@@ -136,6 +137,10 @@ async function init() {
   let center = new Vector(-0.4, -0.75, 0.2);
   let oldCenter = center.clone();
   let radius = 0.25;
+  let velocity = new Vector(0, 0, 0);
+  let gravity = new Vector(0, -4, 0);
+  let useSpherePhysics = false;
+  
   sphere.update(center.toArray(), radius);
 
   // Initial Drops
@@ -145,7 +150,12 @@ async function init() {
 
   // Keyboard state
   const keys = {};
-  window.addEventListener('keydown', (e) => { keys[e.key.toUpperCase()] = true; });
+  window.addEventListener('keydown', (e) => { 
+      keys[e.key.toUpperCase()] = true; 
+      if (e.key.toUpperCase() === 'G') {
+          useSpherePhysics = !useSpherePhysics;
+      }
+  });
   window.addEventListener('keyup', (e) => { keys[e.key.toUpperCase()] = false; });
 
   // Interaction State
@@ -288,19 +298,42 @@ async function init() {
   }
 
   function render() {
+    const time = performance.now();
+    let seconds = (time - prevTime) / 1000;
+    prevTime = time;
+    if (seconds > 1) seconds = 1; // Cap dt for stability
+
     if (keys['L']) {
         lightDir = Vector.fromAngles((90 - angleY) * Math.PI / 180, -angleX * Math.PI / 180);
         updateLight();
     }
     
     // Physics Updates
+    if (mode === MODE_MOVE_SPHERE) {
+        velocity = new Vector(0, 0, 0);
+    } else if (useSpherePhysics) {
+        // Fall down with viscosity under water
+        let percentUnderWater = Math.max(0, Math.min(1, (radius - center.y) / (2 * radius)));
+        velocity = velocity.add(gravity.multiply(seconds - 1.1 * seconds * percentUnderWater));
+        velocity = velocity.subtract(velocity.unit().multiply(percentUnderWater * seconds * velocity.dot(velocity)));
+        center = center.add(velocity.multiply(seconds));
+
+        // Bounce off the bottom
+        if (center.y < radius - 1) {
+            center.y = radius - 1;
+            velocity.y = Math.abs(velocity.y) * 0.7;
+        }
+        
+        sphere.update(center.toArray(), radius);
+    }
+
     water.moveSphere(oldCenter.toArray(), center.toArray(), radius);
     oldCenter = center.clone();
     
     water.stepSimulation();
     water.stepSimulation();
     water.updateNormals();
-    water.updateCaustics(); // Update Caustics
+    water.updateCaustics(); 
 
     updateUniforms();
 
