@@ -27,22 +27,42 @@ async function init() {
   const help = document.getElementById('help');
   const ratio = window.devicePixelRatio || 1;
 
+  // Load Texture
+  async function loadTexture(url) {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    const source = await createImageBitmap(blob);
+    
+    const texture = device.createTexture({
+      label: url,
+      size: [source.width, source.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+
+    device.queue.copyExternalImageToTexture(
+      { source, flipY: true },
+      { texture },
+      { width: source.width, height: source.height }
+    );
+
+    return texture;
+  }
+
+  const tileTexture = await loadTexture('/tiles.jpg');
+
+  const tileSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    addressModeU: 'repeat',
+    addressModeV: 'repeat',
+  });
+
   // Camera state
   let angleX = -25;
   let angleY = -200.5;
   
   // Create Pool Geometry (Cube with -y face removed)
-  // Original Cube: -1 to 1
-  // Faces: -x, +x, -y, +y, -z, +z
-  // We remove -y (bottom in original coords, top in transformed coords)
-  // Indices in standard cube generation usually: 
-  // 0: -x, 1: +x, 2: -y, 3: +y, 4: -z, 5: +z
-  
-  // Vertices (Position x, y, z)
-  // 4 vertices per face * 6 faces = 24 vertices
-  // We keep 5 faces = 20 vertices.
-  
-  // Helper to pick octant
   function pickOctant(i) {
     return [
       (i & 1) * 2 - 1,
@@ -73,8 +93,6 @@ async function init() {
       vertexCount++;
     }
     // 2 triangles per face
-    // 0, 1, 2
-    // 2, 1, 3
     indices.push(vOffset + 0, vOffset + 1, vOffset + 2);
     indices.push(vOffset + 2, vOffset + 1, vOffset + 3);
   }
@@ -90,7 +108,7 @@ async function init() {
 
   const indexBuffer = device.createBuffer({
     label: 'Pool Index Buffer',
-    size: indices.length * 4, // Uint32 is safer, though Uint16 is enough for < 65k
+    size: indices.length * 4,
     usage: GPUBufferUsage.INDEX,
     mappedAtCreation: true,
   });
@@ -112,6 +130,8 @@ async function init() {
         modelViewProjectionMatrix : mat4x4f,
       }
       @binding(0) @group(0) var<uniform> uniforms : Uniforms;
+      @binding(1) @group(0) var tileSampler : sampler;
+      @binding(2) @group(0) var tileTexture : texture_2d<f32>;
 
       struct VertexOutput {
         @builtin(position) position : vec4f,
@@ -122,20 +142,29 @@ async function init() {
       fn vs_main(@location(0) position : vec3f) -> VertexOutput {
         var output : VertexOutput;
         
-        // Transform Y coordinate as per WebGL demo
-        // position.y = ((1.0 - position.y) * (7.0 / 12.0) - 1.0) * poolHeight (1.0);
         var transformedPos = position;
         transformedPos.y = ((1.0 - position.y) * (7.0 / 12.0) - 1.0);
 
         output.position = uniforms.modelViewProjectionMatrix * vec4f(transformedPos, 1.0);
-        output.localPos = transformedPos; // Pass to fragment for simple shading
+        output.localPos = transformedPos;
         return output;
       }
 
       @fragment
       fn fs_main(@location(0) localPos : vec3f) -> @location(0) vec4f {
-        // Simple visualization: Color based on position or constant
-        return vec4f(0.5, 0.5, 0.5, 1.0); 
+        var wallColor : vec3f;
+        let point = localPos;
+        
+        // Planar mapping logic from WebGL demo
+        if (abs(point.x) > 0.999) {
+          wallColor = textureSampleLevel(tileTexture, tileSampler, point.yz * 0.5 + vec2f(1.0, 0.5), 0.0).rgb;
+        } else if (abs(point.z) > 0.999) {
+          wallColor = textureSampleLevel(tileTexture, tileSampler, point.yx * 0.5 + vec2f(1.0, 0.5), 0.0).rgb;
+        } else {
+          wallColor = textureSampleLevel(tileTexture, tileSampler, point.xz * 0.5 + 0.5, 0.0).rgb;
+        }
+
+        return vec4f(wallColor, 1.0);
       }
     `
   });
@@ -162,7 +191,7 @@ async function init() {
     },
     primitive: {
       topology: 'triangle-list',
-      cullMode: 'back', // Cull back faces? WebGL uses culling.
+      cullMode: 'back', // Ensure winding order and culling matches
     },
     depthStencil: {
       depthWriteEnabled: true,
@@ -173,10 +202,11 @@ async function init() {
 
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
-    entries: [{
-      binding: 0,
-      resource: { buffer: uniformBuffer }
-    }]
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: tileSampler },
+      { binding: 2, resource: tileTexture.createView() }
+    ]
   });
 
   // Depth Texture
@@ -205,19 +235,8 @@ async function init() {
   onResize();
 
   function updateUniforms() {
-    // Projection
     const aspect = canvas.width / canvas.height;
     const projectionMatrix = mat4.perspective(45 * Math.PI / 180, aspect, 0.01, 100);
-
-    // ModelView
-    // gl.translate(0, 0, -4);
-    // gl.rotate(-angleX, 1, 0, 0);
-    // gl.rotate(-angleY, 0, 1, 0);
-    // gl.translate(0, 0.5, 0);
-    
-    // In wgpu-matrix (and gl-matrix), multiplications are usually applied such that:
-    // result = A * B implies B happens first (if we think of column vectors).
-    // But `mat4.translate(M, v)` does M * T.
     
     const viewMatrix = mat4.identity();
     mat4.translate(viewMatrix, [0, 0, -4], viewMatrix);
