@@ -360,6 +360,12 @@ export class Water {
         // Skybox
         @binding(7) @group(0) var skySampler : sampler;
         @binding(8) @group(0) var skyTexture : texture_cube<f32>;
+        @binding(9) @group(0) var causticTexture : texture_2d<f32>;
+
+        const IOR_AIR : f32 = 1.0;
+        const IOR_WATER : f32 = 1.333;
+        const ABOVewaterColor : vec3f = vec3f(0.25, 1.0, 1.25);
+        const UNDERwaterColor : vec3f = vec3f(0.4, 0.9, 1.0);
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
@@ -405,28 +411,57 @@ export class Water {
             return 1.0e6;
         }
         
-        fn getSphereColor(point: vec3f) -> vec3f {
+        fn getSphereColor(point: vec3f, IOR_AIR: f32, IOR_WATER: f32) -> vec3f {
             var color = vec3f(0.5);
             let sphereRadius = sphere.radius;
-            let dist_x = (1.0 + sphereRadius - abs(point.x)) / sphereRadius;
-            let dist_z = (1.0 + sphereRadius - abs(point.z)) / sphereRadius;
-            let dist_y = (point.y + 1.0 + sphereRadius) / sphereRadius;
-            color *= 1.0 - 0.9 / pow(max(0.1, dist_x), 3.0);
-            color *= 1.0 - 0.9 / pow(max(0.1, dist_z), 3.0);
-            color *= 1.0 - 0.9 / pow(max(0.1, dist_y), 3.0);
+            color *= 1.0 - 0.9 / pow((1.0 + sphereRadius - abs(point.x)) / sphereRadius, 3.0);
+            color *= 1.0 - 0.9 / pow((1.0 + sphereRadius - abs(point.z)) / sphereRadius, 3.0);
+            color *= 1.0 - 0.9 / pow((point.y + 1.0 + sphereRadius) / sphereRadius, 3.0);
+
+            let sphereNormal = (point - sphere.center) / sphereRadius;
+            let refractedLight = refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
+            var diffuse = max(0.0, dot(-refractedLight, sphereNormal)) * 0.5;
+            let info = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
+            if (point.y < info.r) {
+                let causticUV = 0.75 * (point.xz - point.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
+                let caustic = textureSampleLevel(causticTexture, waterSampler, causticUV, 0.0);
+                diffuse *= caustic.r * 4.0;
+            }
+            color += diffuse;
             return color;
         }
 
-        fn getWallColor(point: vec3f) -> vec3f {
+        fn getWallColor(point: vec3f, IOR_AIR: f32, IOR_WATER: f32, poolHeight: f32) -> vec3f {
             var wallColor : vec3f;
+            var normal = vec3f(0.0, 1.0, 0.0);
             if (abs(point.x) > 0.999) {
                 wallColor = textureSampleLevel(tileTexture, tileSampler, point.yz * 0.5 + vec2f(1.0, 0.5), 0.0).rgb;
+                normal = vec3f(-point.x, 0.0, 0.0);
             } else if (abs(point.z) > 0.999) {
                 wallColor = textureSampleLevel(tileTexture, tileSampler, point.yx * 0.5 + vec2f(1.0, 0.5), 0.0).rgb;
+                normal = vec3f(0.0, 0.0, -point.z);
             } else {
                 wallColor = textureSampleLevel(tileTexture, tileSampler, point.xz * 0.5 + 0.5, 0.0).rgb;
             }
-            return wallColor * 0.5;
+
+            var scale = 0.5;
+            scale /= length(point);
+            scale *= 1.0 - 0.9 / pow(length(point - sphere.center) / sphere.radius, 4.0);
+
+            let refractedLight = -refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
+            var diffuse = max(0.0, dot(refractedLight, normal));
+            let info = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
+            if (point.y < info.r) {
+                let causticUV = 0.75 * (point.xz - point.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
+                let caustic = textureSampleLevel(causticTexture, waterSampler, causticUV, 0.0);
+                scale += diffuse * caustic.r * 2.0 * caustic.g;
+            } else {
+                let t = intersectCube(point, refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
+                diffuse *= 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));
+                scale += diffuse * 0.5;
+            }
+
+            return wallColor * scale;
         }
 
         fn getSurfaceRayColor(origin: vec3f, ray: vec3f, waterColor: vec3f) -> vec3f {
@@ -435,17 +470,21 @@ export class Water {
             
             let q = intersectSphere(origin, ray, sphere.center, sphere.radius);
             if (q < 1.0e6) {
-                color = getSphereColor(origin + ray * q);
+                color = getSphereColor(origin + ray * q, IOR_AIR, IOR_WATER);
             } else if (ray.y < 0.0) {
                 let t = intersectCube(origin, ray, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-                color = getWallColor(origin + ray * t.y);
+                color = getWallColor(origin + ray * t.y, IOR_AIR, IOR_WATER, poolHeight);
             } else {
-                // Use Skybox
-                color = textureSampleLevel(skyTexture, skySampler, ray, 0.0).rgb;
-                // Add sun specular
-                let sunDir = normalize(light.direction);
-                let spec = pow(max(0.0, dot(sunDir, ray)), 5000.0);
-                color += vec3f(spec) * vec3f(10.0, 8.0, 6.0);
+                let t = intersectCube(origin, ray, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
+                let hit = origin + ray * t.y;
+                if (hit.y < 2.0 / 12.0) {
+                    color = getWallColor(hit, IOR_AIR, IOR_WATER, poolHeight);
+                } else {
+                    color = textureSampleLevel(skyTexture, skySampler, ray, 0.0).rgb;
+                    let sunDir = normalize(light.direction);
+                    let spec = pow(max(0.0, dot(sunDir, ray)), 5000.0);
+                    color += vec3f(spec) * vec3f(10.0, 8.0, 6.0);
+                }
             }
             
             if (ray.y < 0.0) {
@@ -456,15 +495,16 @@ export class Water {
 
         @fragment
         fn fs_main(@location(0) worldPos : vec3f) -> @location(0) vec4f {
-            let IOR_AIR = 1.0;
-            let IOR_WATER = 1.333;
-            let abovewaterColor = vec3f(0.25, 1.0, 1.25);
-            let underwaterColor = vec3f(0.4, 0.9, 1.0);
-            
-            let uv = worldPos.xz * 0.5 + 0.5;
-            let info = textureSample(waterTexture, waterSampler, uv);
-            
-            let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - info.b*info.b - info.a*info.a)), info.a);
+            var uv = worldPos.xz * 0.5 + 0.5;
+            var info = textureSampleLevel(waterTexture, waterSampler, uv, 0.0);
+
+            for (var i = 0; i < 5; i++) {
+                uv += info.ba * 0.005;
+                info = textureSampleLevel(waterTexture, waterSampler, uv, 0.0);
+            }
+
+            let ba = vec2f(info.b, info.a);
+            let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
             
             let incomingRay = normalize(worldPos - commonUniforms.eyePosition);
             
@@ -473,8 +513,8 @@ export class Water {
             
             let fresnel = mix(0.25, 1.0, pow(1.0 - dot(normal, -incomingRay), 3.0));
             
-            let reflectedColor = getSurfaceRayColor(worldPos, reflectedRay, abovewaterColor);
-            let refractedColor = getSurfaceRayColor(worldPos, refractedRay, abovewaterColor);
+            let reflectedColor = getSurfaceRayColor(worldPos, reflectedRay, ABOVewaterColor);
+            let refractedColor = getSurfaceRayColor(worldPos, refractedRay, ABOVewaterColor);
             
             let finalColor = mix(refractedColor, reflectedColor, fresnel);
             
@@ -525,7 +565,8 @@ export class Water {
             { binding: 5, resource: this.sampler },
             { binding: 6, resource: this.textureA.createView() }, // Use textureA for reading in render
             { binding: 7, resource: this.skySampler },
-            { binding: 8, resource: this.skyTexture.createView({dimension: 'cube'}) }
+            { binding: 8, resource: this.skyTexture.createView({dimension: 'cube'}) },
+            { binding: 9, resource: this.causticsTexture.createView() }
         ]
     });
   }
@@ -542,7 +583,8 @@ export class Water {
             { binding: 5, resource: this.sampler },
             { binding: 6, resource: this.textureA.createView() },
             { binding: 7, resource: this.skySampler },
-            { binding: 8, resource: this.skyTexture.createView({dimension: 'cube'}) }
+            { binding: 8, resource: this.skyTexture.createView({dimension: 'cube'}) },
+            { binding: 9, resource: this.causticsTexture.createView() }
         ]
     });
 
@@ -606,7 +648,8 @@ export class Water {
           
           let info = textureSampleLevel(waterTexture, waterSampler, uv, 0.0);
           
-          let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - info.b*info.b - info.a*info.a)), info.a);
+          let ba = info.ba * 0.5;
+          let normal = vec3f(ba.x, sqrt(max(0.0, 1.0 - dot(ba, ba))), ba.y);
           
           let IOR_AIR = 1.0;
           let IOR_WATER = 1.333;
