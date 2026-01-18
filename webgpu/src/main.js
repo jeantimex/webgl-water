@@ -1,7 +1,7 @@
 import { mat4, vec3 } from 'wgpu-matrix';
 import { Pool } from './pool.js';
 import { Sphere } from './sphere.js';
-import { Vector } from './lightgl.js';
+import { Vector, Raytracer } from './lightgl.js';
 
 async function init() {
   const gpu = navigator.gpu;
@@ -65,6 +65,19 @@ async function init() {
   let angleX = -25;
   let angleY = -200.5;
 
+  function getMatrices() {
+    const aspect = canvas.width / canvas.height;
+    const projectionMatrix = mat4.perspective(45 * Math.PI / 180, aspect, 0.01, 100);
+    
+    const viewMatrix = mat4.identity();
+    mat4.translate(viewMatrix, [0, 0, -4], viewMatrix);
+    mat4.rotateX(viewMatrix, -angleX * Math.PI / 180, viewMatrix);
+    mat4.rotateY(viewMatrix, -angleY * Math.PI / 180, viewMatrix);
+    mat4.translate(viewMatrix, [0, 0.5, 0], viewMatrix);
+    
+    return { projectionMatrix, viewMatrix };
+  }
+
   // Uniform Buffer (Matrices) - Shared ViewProjection
   const uniformBufferSize = 4 * 16; // 4x4 matrix
   const uniformBuffer = device.createBuffer({
@@ -98,9 +111,82 @@ async function init() {
   const sphere = new Sphere(device, format, uniformBuffer, lightUniformBuffer, sphereUniformBuffer);
   
   // Initial Sphere Physics State
-  let center = [-0.4, -0.75, 0.2];
+  let center = new Vector(-0.4, -0.75, 0.2);
   let radius = 0.25;
-  sphere.update(center, radius);
+  sphere.update(center.toArray(), radius);
+
+  // Interaction State
+  let mode = -1;
+  const MODE_ORBIT_CAMERA = 1;
+  let oldX, oldY;
+
+  function startDrag(x, y) {
+    oldX = x;
+    oldY = y;
+    
+    const { projectionMatrix, viewMatrix } = getMatrices();
+    // Note: Raytracer expects matrices as Float32Arrays or compatible objects. wgpu-matrix returns Float32Arrays.
+    // Raytracer constructor: (modelview, projection, viewport)
+    // Viewport: [0, 0, width, height]
+    const viewport = [0, 0, canvas.width, canvas.height];
+    
+    const tracer = new Raytracer(viewMatrix, projectionMatrix, viewport);
+    const ray = tracer.getRayForPixel(x * ratio, y * ratio);
+    
+    const sphereHit = Raytracer.hitTestSphere(tracer.eye, ray, center, radius);
+    
+    if (sphereHit) {
+      // mode = MODE_MOVE_SPHERE; // Next step
+      mode = -1; 
+    } else {
+      mode = MODE_ORBIT_CAMERA;
+    }
+  }
+
+  function duringDrag(x, y) {
+    if (mode === MODE_ORBIT_CAMERA) {
+      angleY -= x - oldX;
+      angleX -= y - oldY;
+      angleX = Math.max(-89.999, Math.min(89.999, angleX));
+    }
+    oldX = x;
+    oldY = y;
+  }
+
+  function stopDrag() {
+    mode = -1;
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    e.preventDefault(); // Prevent text selection etc
+    startDrag(e.offsetX, e.offsetY);
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    // Handle drag even if mouse leaves canvas, but coordinates need to be relative to canvas?
+    // WebGL demo uses simple pageX/Y but logic in startDrag uses augmented event.
+    // Here we can use e.movementX/Y or track simple delta.
+    // If we use global mousemove, we need to correct coordinates if we used them for raycasting (which we do only in startDrag).
+    // In duringDrag for rotation we only use delta (x-oldX).
+    // So passing clientX/Y or pageX/Y is fine as long as consistent.
+    // But startDrag used offsetX/Y. 
+    
+    // Let's stick to canvas-relative logic or just delta logic.
+    // If I use window listener, I should probably track "isDragging" state.
+    if (mode !== -1) {
+        // e.offsetX is undefined on window events usually?
+        // Let's calculate equivalent.
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        duringDrag(x, y);
+    }
+  });
+
+  window.addEventListener('mouseup', () => {
+    stopDrag();
+  });
+
 
   // Depth Texture
   let depthTexture;
@@ -128,17 +214,8 @@ async function init() {
   onResize();
 
   function updateUniforms() {
-    const aspect = canvas.width / canvas.height;
-    const projectionMatrix = mat4.perspective(45 * Math.PI / 180, aspect, 0.01, 100);
-    
-    const viewMatrix = mat4.identity();
-    mat4.translate(viewMatrix, [0, 0, -4], viewMatrix);
-    mat4.rotateX(viewMatrix, -angleX * Math.PI / 180, viewMatrix);
-    mat4.rotateY(viewMatrix, -angleY * Math.PI / 180, viewMatrix);
-    mat4.translate(viewMatrix, [0, 0.5, 0], viewMatrix);
-
+    const { projectionMatrix, viewMatrix } = getMatrices();
     const viewProjectionMatrix = mat4.multiply(projectionMatrix, viewMatrix);
-    
     device.queue.writeBuffer(uniformBuffer, 0, viewProjectionMatrix);
   }
 
