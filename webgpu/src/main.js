@@ -1,6 +1,7 @@
 import { mat4, vec3 } from 'wgpu-matrix';
 import { Pool } from './pool.js';
 import { Sphere } from './sphere.js';
+import { Vector } from './lightgl.js';
 
 async function init() {
   const gpu = navigator.gpu;
@@ -71,11 +72,23 @@ async function init() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
+  // Lighting State
+  const lightDir = new Vector(2.0, 2.0, -1.0).unit();
+  const lightUniformBuffer = device.createBuffer({
+    size: 16, // vec3 + padding
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  
+  function updateLight() {
+      device.queue.writeBuffer(lightUniformBuffer, 0, new Float32Array([...lightDir.toArray(), 0]));
+  }
+  updateLight();
+
   // Create Pool
-  const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler);
+  const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer);
 
   // Create Sphere
-  const sphere = new Sphere(device, format, uniformBuffer);
+  const sphere = new Sphere(device, format, uniformBuffer, lightUniformBuffer);
   
   // Initial Sphere Physics State
   let center = [-0.4, -0.75, 0.2];

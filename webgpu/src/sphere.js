@@ -1,15 +1,15 @@
 export class Sphere {
-  constructor(device, format, uniformBuffer) {
+  constructor(device, format, uniformBuffer, lightUniformBuffer) {
     this.device = device;
     this.format = format;
-    this.commonUniformBuffer = uniformBuffer; // Contains ViewProjection Matrix
+    this.commonUniformBuffer = uniformBuffer; 
 
     this.center = [0, 0, 0];
     this.radius = 1;
 
     this.createGeometry();
     this.createUniforms();
-    this.createPipeline();
+    this.createPipeline(lightUniformBuffer);
   }
 
   update(center, radius) {
@@ -25,7 +25,6 @@ export class Sphere {
   }
 
   createGeometry() {
-    // Ported from lightgl.js Mesh.sphere
     const detail = 10; 
     
     class Indexer {
@@ -133,7 +132,7 @@ export class Sphere {
     });
   }
 
-  createPipeline() {
+  createPipeline(lightUniformBuffer) {
     const shaderModule = this.device.createShaderModule({
       label: 'Sphere Shader',
       code: `
@@ -147,6 +146,11 @@ export class Sphere {
           radius : f32,
         }
         @binding(1) @group(0) var<uniform> sphereUniforms : SphereUniforms;
+        
+        struct LightUniforms {
+           direction : vec3f,
+        }
+        @binding(2) @group(0) var<uniform> light : LightUniforms;
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
@@ -167,18 +171,14 @@ export class Sphere {
 
         @fragment
         fn fs_main(@location(0) localPos : vec3f, @location(1) worldPos : vec3f) -> @location(0) vec4f {
-          let lightDir = normalize(vec3f(2.0, 2.0, -1.0));
           let IOR_AIR = 1.0;
           let IOR_WATER = 1.333;
           
           var color = vec3f(0.5);
 
-          // Analytic ambient occlusion (simplified from renderer.js)
-          // Note: WebGL demo uses hardcoded walls at x= +/-1, z= +/-1, floor at -1 (poolHeight?)
           let sphereRadius = sphereUniforms.radius;
           let point = worldPos;
           
-          // These calculations mimic the WebGL demo's AO
           let dist_x = (1.0 + sphereRadius - abs(point.x)) / sphereRadius;
           let dist_z = (1.0 + sphereRadius - abs(point.z)) / sphereRadius;
           let dist_y = (point.y + 1.0 + sphereRadius) / sphereRadius;
@@ -187,13 +187,9 @@ export class Sphere {
           color *= 1.0 - 0.9 / pow(max(0.1, dist_z), 3.0);
           color *= 1.0 - 0.9 / pow(max(0.1, dist_y), 3.0);
 
-          // Diffuse lighting
-          // WebGL uses refract(-light, vec3(0,1,0), ...) for caustics on sphere?
-          // "vec3 refractedLight = refract(-light, vec3(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);"
-          let refractedLight = refract(-lightDir, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
-          let sphereNormal = normalize(localPos); // Local pos on unit sphere IS the normal
+          let refractedLight = refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
+          let sphereNormal = normalize(localPos);
           
-          // "max(0.0, dot(-refractedLight, sphereNormal)) * 0.5"
           let diffuse = max(0.0, dot(-refractedLight, sphereNormal)) * 0.5;
           
           color += diffuse;
@@ -238,7 +234,8 @@ export class Sphere {
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.commonUniformBuffer } },
-        { binding: 1, resource: { buffer: this.sphereUniformBuffer } }
+        { binding: 1, resource: { buffer: this.sphereUniformBuffer } },
+        { binding: 2, resource: { buffer: lightUniformBuffer } }
       ]
     });
   }

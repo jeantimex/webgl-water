@@ -1,14 +1,13 @@
 export class Pool {
-  constructor(device, format, uniformBuffer, tileTexture, tileSampler) {
+  constructor(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer) {
     this.device = device;
     this.format = format;
     
     this.createGeometry();
-    this.createPipeline(uniformBuffer, tileTexture, tileSampler);
+    this.createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer);
   }
 
   createGeometry() {
-    // Helper to pick octant
     function pickOctant(i) {
       return [
         (i & 1) * 2 - 1,
@@ -38,7 +37,6 @@ export class Pool {
         positions.push(...pos);
         vertexCount++;
       }
-      // 2 triangles per face
       indices.push(vOffset + 0, vOffset + 1, vOffset + 2);
       indices.push(vOffset + 2, vOffset + 1, vOffset + 3);
     }
@@ -64,7 +62,7 @@ export class Pool {
     this.indexBuffer.unmap();
   }
 
-  createPipeline(uniformBuffer, tileTexture, tileSampler) {
+  createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer) {
     const shaderModule = this.device.createShaderModule({
       label: 'Pool Shader',
       code: `
@@ -74,10 +72,26 @@ export class Pool {
         @binding(0) @group(0) var<uniform> uniforms : Uniforms;
         @binding(1) @group(0) var tileSampler : sampler;
         @binding(2) @group(0) var tileTexture : texture_2d<f32>;
+        
+        struct LightUniforms {
+           direction : vec3f,
+        }
+        @binding(3) @group(0) var<uniform> light : LightUniforms;
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
           @location(0) localPos : vec3f,
+        }
+        
+        // Helper functions
+        fn intersectCube(origin: vec3f, ray: vec3f, cubeMin: vec3f, cubeMax: vec3f) -> vec2f {
+          let tMin = (cubeMin - origin) / ray;
+          let tMax = (cubeMax - origin) / ray;
+          let t1 = min(tMin, tMax);
+          let t2 = max(tMin, tMax);
+          let tNear = max(max(t1.x, t1.y), t1.z);
+          let tFar = min(min(t2.x, t2.y), t2.z);
+          return vec2f(tNear, tFar);
         }
 
         @vertex
@@ -97,8 +111,6 @@ export class Pool {
           var wallColor : vec3f;
           let point = localPos;
           
-          // Planar mapping logic from WebGL demo
-          // Using textureSampleLevel to avoid non-uniform control flow error
           if (abs(point.x) > 0.999) {
             wallColor = textureSampleLevel(tileTexture, tileSampler, point.yz * 0.5 + vec2f(1.0, 0.5), 0.0).rgb;
           } else if (abs(point.z) > 0.999) {
@@ -106,8 +118,30 @@ export class Pool {
           } else {
             wallColor = textureSampleLevel(tileTexture, tileSampler, point.xz * 0.5 + 0.5, 0.0).rgb;
           }
+          
+          let IOR_AIR = 1.0;
+          let IOR_WATER = 1.333;
+          let poolHeight = 1.0; // The shader uses 1.0 implicitly in logic
+          
+          // Basic normal determination
+          var normal = vec3f(0.0, 1.0, 0.0);
+          if (abs(point.x) > 0.999) { normal = vec3f(-point.x, 0.0, 0.0); }
+          else if (abs(point.z) > 0.999) { normal = vec3f(0.0, 0.0, -point.z); }
+          
+          var scale = 0.5;
+          let refractedLight = -refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
+          let diffuse = max(0.0, dot(refractedLight, normal));
+          
+          // Shadow for the rim of the pool
+          let t = intersectCube(point, refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
+          
+          // "diffuse *= 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));"
+          // In WGSL:
+          let shadowFactor = 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));
+          
+          scale += diffuse * shadowFactor * 0.5;
 
-          return vec4f(wallColor, 1.0);
+          return vec4f(wallColor * scale, 1.0);
         }
       `
     });
@@ -148,7 +182,8 @@ export class Pool {
       entries: [
         { binding: 0, resource: { buffer: uniformBuffer } },
         { binding: 1, resource: tileSampler },
-        { binding: 2, resource: tileTexture.createView() }
+        { binding: 2, resource: tileTexture.createView() },
+        { binding: 3, resource: { buffer: lightUniformBuffer } }
       ]
     });
   }
