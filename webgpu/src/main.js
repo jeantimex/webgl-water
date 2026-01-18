@@ -140,6 +140,7 @@ async function init() {
   let velocity = new Vector(0, 0, 0);
   let gravity = new Vector(0, -4, 0);
   let useSpherePhysics = false;
+  let paused = false;
   
   sphere.update(center.toArray(), radius);
 
@@ -151,9 +152,12 @@ async function init() {
   // Keyboard state
   const keys = {};
   window.addEventListener('keydown', (e) => { 
-      keys[e.key.toUpperCase()] = true; 
-      if (e.key.toUpperCase() === 'G') {
+      const key = e.key.toUpperCase();
+      keys[key] = true; 
+      if (key === 'G') {
           useSpherePhysics = !useSpherePhysics;
+      } else if (key === ' ') {
+          paused = !paused;
       }
   });
   window.addEventListener('keyup', (e) => { keys[e.key.toUpperCase()] = false; });
@@ -301,39 +305,39 @@ async function init() {
     const time = performance.now();
     let seconds = (time - prevTime) / 1000;
     prevTime = time;
-    if (seconds > 1) seconds = 1; // Cap dt for stability
+    if (seconds > 1) seconds = 1;
 
     if (keys['L']) {
         lightDir = Vector.fromAngles((90 - angleY) * Math.PI / 180, -angleX * Math.PI / 180);
         updateLight();
     }
     
-    // Physics Updates
-    if (mode === MODE_MOVE_SPHERE) {
-        velocity = new Vector(0, 0, 0);
-    } else if (useSpherePhysics) {
-        // Fall down with viscosity under water
-        let percentUnderWater = Math.max(0, Math.min(1, (radius - center.y) / (2 * radius)));
-        velocity = velocity.add(gravity.multiply(seconds - 1.1 * seconds * percentUnderWater));
-        velocity = velocity.subtract(velocity.unit().multiply(percentUnderWater * seconds * velocity.dot(velocity)));
-        center = center.add(velocity.multiply(seconds));
+    if (!paused) {
+        // Physics Updates
+        if (mode === MODE_MOVE_SPHERE) {
+            velocity = new Vector(0, 0, 0);
+        } else if (useSpherePhysics) {
+            let percentUnderWater = Math.max(0, Math.min(1, (radius - center.y) / (2 * radius)));
+            velocity = velocity.add(gravity.multiply(seconds - 1.1 * seconds * percentUnderWater));
+            velocity = velocity.subtract(velocity.unit().multiply(percentUnderWater * seconds * velocity.dot(velocity)));
+            center = center.add(velocity.multiply(seconds));
 
-        // Bounce off the bottom
-        if (center.y < radius - 1) {
-            center.y = radius - 1;
-            velocity.y = Math.abs(velocity.y) * 0.7;
+            if (center.y < radius - 1) {
+                center.y = radius - 1;
+                velocity.y = Math.abs(velocity.y) * 0.7;
+            }
+            
+            sphere.update(center.toArray(), radius);
         }
-        
-        sphere.update(center.toArray(), radius);
-    }
 
-    water.moveSphere(oldCenter.toArray(), center.toArray(), radius);
-    oldCenter = center.clone();
-    
-    water.stepSimulation();
-    water.stepSimulation();
-    water.updateNormals();
-    water.updateCaustics(); 
+        water.moveSphere(oldCenter.toArray(), center.toArray(), radius);
+        oldCenter = center.clone();
+        
+        water.stepSimulation();
+        water.stepSimulation();
+        water.updateNormals();
+        water.updateCaustics(); 
+    }
 
     updateUniforms();
 
@@ -353,10 +357,8 @@ async function init() {
       }
     });
 
-    // Pass caustics texture to Pool and Sphere
     pool.render(passEncoder, water.textureA, water.sampler, water.causticsTexture);
     sphere.render(passEncoder, water.textureA, water.sampler, water.causticsTexture);
-    
     water.renderSurface(passEncoder);
     
     passEncoder.end();
