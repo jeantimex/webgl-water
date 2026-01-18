@@ -1,6 +1,7 @@
 import { mat4, vec3 } from 'wgpu-matrix';
 import { Pool } from './pool.js';
 import { Sphere } from './sphere.js';
+import { Water } from './water.js';
 import { Vector, Raytracer } from './lightgl.js';
 
 async function init() {
@@ -15,7 +16,15 @@ async function init() {
     document.getElementById('loading').innerHTML = 'No WebGPU adapter found.';
     return;
   }
-  const device = await adapter.requestDevice();
+  
+  const requiredFeatures = [];
+  if (adapter.features.has('float32-filterable')) {
+    requiredFeatures.push('float32-filterable');
+  }
+  
+  const device = await adapter.requestDevice({
+    requiredFeatures
+  });
 
   const canvas = document.querySelector('canvas');
   const context = canvas.getContext('webgpu');
@@ -78,8 +87,8 @@ async function init() {
     return { projectionMatrix, viewMatrix };
   }
 
-  // Uniform Buffer (Matrices) - Shared ViewProjection
-  const uniformBufferSize = 4 * 16; // 4x4 matrix
+  // Uniform Buffer (Matrices) - Shared ViewProjection + Eye Position
+  const uniformBufferSize = 80; // 64 (mat4) + 16 (vec3+padding)
   const uniformBuffer = device.createBuffer({
     size: uniformBufferSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -88,7 +97,7 @@ async function init() {
   // Lighting State
   let lightDir = new Vector(2.0, 2.0, -1.0).unit();
   const lightUniformBuffer = device.createBuffer({
-    size: 16, // vec3 + padding
+    size: 16, 
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   
@@ -103,16 +112,21 @@ async function init() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  // Create Pool
+  // Create Objects
   const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer);
-
-  // Create Sphere
   const sphere = new Sphere(device, format, uniformBuffer, lightUniformBuffer, sphereUniformBuffer);
-  
+  const water = new Water(device, 256, 256, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, tileTexture, tileSampler);
+
   // Initial Sphere Physics State
   let center = new Vector(-0.4, -0.75, 0.2);
+  let oldCenter = center.clone();
   let radius = 0.25;
   sphere.update(center.toArray(), radius);
+
+  // Initial Drops
+  for (let i = 0; i < 20; i++) {
+    water.addDrop(Math.random() * 2 - 1, Math.random() * 2 - 1, 0.03, (i & 1) ? 0.01 : -0.01);
+  }
 
   // Keyboard state
   const keys = {};
@@ -121,6 +135,7 @@ async function init() {
 
   // Interaction State
   let mode = -1;
+  const MODE_ADD_DROPS = 0;
   const MODE_ORBIT_CAMERA = 1;
   const MODE_MOVE_SPHERE = 2;
   let oldX, oldY;
@@ -134,15 +149,25 @@ async function init() {
     const viewport = [0, 0, canvas.width, canvas.height];
     const tracer = new Raytracer(viewMatrix, projectionMatrix, viewport);
     const ray = tracer.getRayForPixel(x * ratio, y * ratio);
-    const sphereHit = Raytracer.hitTestSphere(tracer.eye, ray, center, radius);
     
+    // Check Sphere Hit
+    const sphereHit = Raytracer.hitTestSphere(tracer.eye, ray, center, radius);
     if (sphereHit) {
       mode = MODE_MOVE_SPHERE;
       prevHit = sphereHit.hit;
-      // Plane perpendicular to camera look vector
       planeNormal = tracer.getRayForPixel(canvas.width / 2, canvas.height / 2).negative();
+      return;
+    }
+    
+    // Check Water Hit
+    const tPlane = -tracer.eye.y / ray.y;
+    const pointOnPlane = tracer.eye.add(ray.multiply(tPlane));
+    
+    if (Math.abs(pointOnPlane.x) < 1 && Math.abs(pointOnPlane.z) < 1) {
+        mode = MODE_ADD_DROPS;
+        water.addDrop(pointOnPlane.x, pointOnPlane.z, 0.03, 0.01);
     } else {
-      mode = MODE_ORBIT_CAMERA;
+        mode = MODE_ORBIT_CAMERA;
     }
   }
 
@@ -157,21 +182,27 @@ async function init() {
       const tracer = new Raytracer(viewMatrix, projectionMatrix, viewport);
       const ray = tracer.getRayForPixel(x * ratio, y * ratio);
       
-      // Intersect ray with plane defined by prevHit and planeNormal
-      // t = dot(prevHit - eye, planeNormal) / dot(ray, planeNormal)
-      // or t = -dot(eye - prevHit, planeNormal) / ...
       const t = -planeNormal.dot(tracer.eye.subtract(prevHit)) / planeNormal.dot(ray);
       const nextHit = tracer.eye.add(ray.multiply(t));
       
       center = center.add(nextHit.subtract(prevHit));
-      
-      // Clamp to pool bounds
       center.x = Math.max(radius - 1, Math.min(1 - radius, center.x));
       center.y = Math.max(radius - 1, Math.min(10, center.y));
       center.z = Math.max(radius - 1, Math.min(1 - radius, center.z));
       
       sphere.update(center.toArray(), radius);
       prevHit = nextHit;
+    } else if (mode === MODE_ADD_DROPS) {
+        const { projectionMatrix, viewMatrix } = getMatrices();
+        const viewport = [0, 0, canvas.width, canvas.height];
+        const tracer = new Raytracer(viewMatrix, projectionMatrix, viewport);
+        const ray = tracer.getRayForPixel(x * ratio, y * ratio);
+        const tPlane = -tracer.eye.y / ray.y;
+        const pointOnPlane = tracer.eye.add(ray.multiply(tPlane));
+        
+        if (Math.abs(pointOnPlane.x) < 1 && Math.abs(pointOnPlane.z) < 1) {
+            water.addDrop(pointOnPlane.x, pointOnPlane.z, 0.03, 0.01);
+        }
     }
     oldX = x;
     oldY = y;
@@ -228,15 +259,32 @@ async function init() {
   function updateUniforms() {
     const { projectionMatrix, viewMatrix } = getMatrices();
     const viewProjectionMatrix = mat4.multiply(projectionMatrix, viewMatrix);
-    device.queue.writeBuffer(uniformBuffer, 0, viewProjectionMatrix);
+    
+    // Extract Eye Position
+    const invView = mat4.invert(viewMatrix);
+    const eyeVec = vec3.transformMat4([0,0,0], invView);
+
+    // Upload VP (64 bytes) + Eye (12 bytes + 4 padding)
+    const uniformData = new Float32Array(20); 
+    uniformData.set(viewProjectionMatrix, 0);
+    uniformData.set(eyeVec, 16);
+    
+    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
   }
 
   function render() {
-    // Logic from @webgl/main.js for L key
     if (keys['L']) {
         lightDir = Vector.fromAngles((90 - angleY) * Math.PI / 180, -angleX * Math.PI / 180);
         updateLight();
     }
+    
+    // Physics Updates
+    water.moveSphere(oldCenter.toArray(), center.toArray(), radius);
+    oldCenter = center.clone();
+    
+    water.stepSimulation();
+    water.stepSimulation();
+    water.updateNormals();
 
     updateUniforms();
 
@@ -256,8 +304,11 @@ async function init() {
       }
     });
 
-    pool.render(passEncoder);
-    sphere.render(passEncoder);
+    // Pass water texture for underwater effects
+    pool.render(passEncoder, water.textureA, water.sampler);
+    sphere.render(passEncoder, water.textureA, water.sampler);
+    
+    water.renderSurface(passEncoder);
     
     passEncoder.end();
 

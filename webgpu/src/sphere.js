@@ -4,13 +4,13 @@ export class Sphere {
     this.format = format;
     this.commonUniformBuffer = uniformBuffer; 
     this.sphereUniformBuffer = sphereUniformBuffer;
+    this.lightUniformBuffer = lightUniformBuffer;
 
     this.center = [0, 0, 0];
     this.radius = 1;
 
     this.createGeometry();
-    // this.createUniforms(); // No longer needed
-    this.createPipeline(lightUniformBuffer);
+    this.createPipeline();
   }
 
   update(center, radius) {
@@ -126,7 +126,14 @@ export class Sphere {
     this.indexBuffer.unmap();
   }
 
-  createPipeline(lightUniformBuffer) {
+  createUniforms() {
+    this.sphereUniformBuffer = this.device.createBuffer({
+      size: 16, // vec3 center + f32 radius
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+  }
+
+  createPipeline() {
     const shaderModule = this.device.createShaderModule({
       label: 'Sphere Shader',
       code: `
@@ -145,6 +152,9 @@ export class Sphere {
            direction : vec3f,
         }
         @binding(2) @group(0) var<uniform> light : LightUniforms;
+        
+        @binding(3) @group(0) var waterSampler : sampler;
+        @binding(4) @group(0) var waterTexture : texture_2d<f32>;
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
@@ -188,6 +198,13 @@ export class Sphere {
           
           color += diffuse;
           
+          // Underwater tint
+          let waterInfo = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
+          if (point.y < waterInfo.r) {
+             let underwaterColor = vec3f(0.4, 0.9, 1.0);
+             color *= underwaterColor * 1.2;
+          }
+          
           return vec4f(color, 1.0); 
         }
       `
@@ -223,20 +240,22 @@ export class Sphere {
         format: 'depth24plus',
       }
     });
+  }
 
-    this.bindGroup = this.device.createBindGroup({
+  render(passEncoder, waterTexture, waterSampler) {
+    const bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.commonUniformBuffer } },
         { binding: 1, resource: { buffer: this.sphereUniformBuffer } },
-        { binding: 2, resource: { buffer: lightUniformBuffer } }
+        { binding: 2, resource: { buffer: this.lightUniformBuffer } },
+        { binding: 3, resource: waterSampler },
+        { binding: 4, resource: waterTexture.createView() }
       ]
     });
-  }
 
-  render(passEncoder) {
     passEncoder.setPipeline(this.pipeline);
-    passEncoder.setBindGroup(0, this.bindGroup);
+    passEncoder.setBindGroup(0, bindGroup);
     passEncoder.setVertexBuffer(0, this.positionBuffer);
     passEncoder.setIndexBuffer(this.indexBuffer, 'uint32');
     passEncoder.drawIndexed(this.vertexCount);

@@ -3,8 +3,15 @@ export class Pool {
     this.device = device;
     this.format = format;
     
+    // Store resources for per-frame bind group creation
+    this.uniformBuffer = uniformBuffer;
+    this.tileTexture = tileTexture;
+    this.tileSampler = tileSampler;
+    this.lightUniformBuffer = lightUniformBuffer;
+    this.sphereUniformBuffer = sphereUniformBuffer;
+
     this.createGeometry();
-    this.createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer);
+    this.createPipeline();
   }
 
   createGeometry() {
@@ -62,12 +69,13 @@ export class Pool {
     this.indexBuffer.unmap();
   }
 
-  createPipeline(uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer) {
+  createPipeline() {
     const shaderModule = this.device.createShaderModule({
       label: 'Pool Shader',
       code: `
         struct Uniforms {
           modelViewProjectionMatrix : mat4x4f,
+          eyePosition : vec3f,
         }
         @binding(0) @group(0) var<uniform> uniforms : Uniforms;
         @binding(1) @group(0) var tileSampler : sampler;
@@ -83,6 +91,9 @@ export class Pool {
           radius : f32,
         }
         @binding(4) @group(0) var<uniform> sphere : SphereUniforms;
+        
+        @binding(5) @group(0) var waterSampler : sampler;
+        @binding(6) @group(0) var waterTexture : texture_2d<f32>;
 
         struct VertexOutput {
           @builtin(position) position : vec4f,
@@ -147,29 +158,31 @@ export class Pool {
           else if (abs(point.z) > 0.999) { normal = vec3f(0.0, 0.0, -point.z); }
           
           var scale = 0.5;
-          // Refracted light for shadows/caustics
           let refractedLight = -refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
           
-          // Direct light diffuse for walls (should it use refracted light or direct light?)
-          // renderer.js uses refractedLight for diffuse calc on walls.
           let diffuse = max(0.0, dot(refractedLight, normal));
           
-          // Shadow for the rim of the pool
           let t = intersectCube(point, refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
           let shadowFactor = 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));
           
           scale += diffuse * shadowFactor * 0.5;
 
           // Sphere Shadow
-          // Trace ray from point towards light source (refractedLight points UP towards light)
-          
           let distToSphere = intersectSphere(point, refractedLight, sphere.center, sphere.radius);
           if (distToSphere < 1.0e5) {
-             // Hit sphere -> Shadow
-             scale *= 0.5; // Darken
+             scale *= 0.5; 
+          }
+          
+          var finalColor = wallColor * scale;
+          
+          // Underwater tint
+          let waterInfo = textureSampleLevel(waterTexture, waterSampler, point.xz * 0.5 + 0.5, 0.0);
+          if (point.y < waterInfo.r) {
+             let underwaterColor = vec3f(0.4, 0.9, 1.0);
+             finalColor *= underwaterColor * 1.2;
           }
 
-          return vec4f(wallColor * scale, 1.0);
+          return vec4f(finalColor, 1.0);
         }
       `
     });
@@ -204,22 +217,24 @@ export class Pool {
         format: 'depth24plus',
       }
     });
-
-    this.bindGroup = this.device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: tileSampler },
-        { binding: 2, resource: tileTexture.createView() },
-        { binding: 3, resource: { buffer: lightUniformBuffer } },
-        { binding: 4, resource: { buffer: sphereUniformBuffer } }
-      ]
-    });
   }
 
-  render(passEncoder) {
+  render(passEncoder, waterTexture, waterSampler) {
+    const bindGroup = this.device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 1, resource: this.tileSampler },
+        { binding: 2, resource: this.tileTexture.createView() },
+        { binding: 3, resource: { buffer: this.lightUniformBuffer } },
+        { binding: 4, resource: { buffer: this.sphereUniformBuffer } },
+        { binding: 5, resource: waterSampler },
+        { binding: 6, resource: waterTexture.createView() }
+      ]
+    });
+
     passEncoder.setPipeline(this.pipeline);
-    passEncoder.setBindGroup(0, this.bindGroup);
+    passEncoder.setBindGroup(0, bindGroup);
     passEncoder.setVertexBuffer(0, this.positionBuffer);
     passEncoder.setIndexBuffer(this.indexBuffer, 'uint32');
     passEncoder.drawIndexed(this.vertexCount);
