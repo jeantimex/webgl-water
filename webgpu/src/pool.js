@@ -1,5 +1,5 @@
 export class Pool {
-  constructor(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer) {
+  constructor(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer, shadowUniformBuffer) {
     this.device = device;
     this.format = format;
     
@@ -9,6 +9,7 @@ export class Pool {
     this.tileSampler = tileSampler;
     this.lightUniformBuffer = lightUniformBuffer;
     this.sphereUniformBuffer = sphereUniformBuffer;
+    this.shadowUniformBuffer = shadowUniformBuffer;
 
     this.createGeometry();
     this.createPipeline();
@@ -92,6 +93,13 @@ export class Pool {
         }
         @binding(4) @group(0) var<uniform> sphere : SphereUniforms;
         
+        struct ShadowUniforms {
+            rim : f32,
+            sphere : f32,
+            ao : f32,
+        }
+        @binding(8) @group(0) var<uniform> shadows : ShadowUniforms;
+        
         @binding(5) @group(0) var waterSampler : sampler;
         @binding(6) @group(0) var waterTexture : texture_2d<f32>;
         @binding(7) @group(0) var causticTexture : texture_2d<f32>;
@@ -148,11 +156,13 @@ export class Pool {
           var scale = 0.5;
           
           // Pool ambient occlusion
-          scale /= length(point); 
+          let poolAO = 1.0 / length(point);
+          scale *= mix(1.0, poolAO, shadows.ao);
           
           // Sphere ambient occlusion (Replaces analytic shadow, keeps sphere uniform used)
           let dist = length(point - sphere.center) / sphere.radius;
-          scale *= 1.0 - 0.9 / pow(max(0.0, dist), 4.0);
+          let sphereAO = 1.0 - 0.9 / pow(max(0.0, dist), 4.0);
+          scale *= mix(1.0, sphereAO, shadows.sphere);
 
           let refractedLight = -refract(-light.direction, vec3f(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
           
@@ -165,12 +175,21 @@ export class Pool {
              let causticUV = 0.75 * (point.xz - point.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
              let caustic = textureSampleLevel(causticTexture, tileSampler, causticUV, 0.0); 
              
-             scale += diffuse * caustic.r * 2.0 * caustic.g;
+             var intensity = caustic.r;
+             var sphereShadow = caustic.g;
+
+             // Heuristic: If Rim Shadow is OFF, fill the black void (outside mesh) with ambient light
+             if (shadows.rim < 0.5 && intensity < 0.001) {
+                 intensity = 0.2;
+                 sphereShadow = 1.0;
+             }
+             
+             scale += diffuse * intensity * 2.0 * sphereShadow;
           } else {
              // Above water: Rim shadow
              let t = intersectCube(point, refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
              let shadowFactor = 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (point.y + refractedLight.y * t.y - 2.0 / 12.0)));
-             scale += diffuse * shadowFactor * 0.5;
+             scale += diffuse * mix(1.0, shadowFactor, shadows.rim) * 0.5;
           }
 
           var finalColor = wallColor * scale;
@@ -228,7 +247,8 @@ export class Pool {
         { binding: 4, resource: { buffer: this.sphereUniformBuffer } },
         { binding: 5, resource: waterSampler },
         { binding: 6, resource: waterTexture.createView() },
-        { binding: 7, resource: causticsTexture.createView() }
+        { binding: 7, resource: causticsTexture.createView() },
+        { binding: 8, resource: { buffer: this.shadowUniformBuffer } }
       ]
     });
 

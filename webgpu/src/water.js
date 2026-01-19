@@ -1,5 +1,5 @@
 export class Water {
-  constructor(device, width, height, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, tileTexture, tileSampler, skyTexture, skySampler) {
+  constructor(device, width, height, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, shadowUniformBuffer, tileTexture, tileSampler, skyTexture, skySampler) {
     this.device = device;
     this.width = width;
     this.height = height;
@@ -8,6 +8,7 @@ export class Water {
     this.commonUniformBuffer = uniformBuffer;
     this.lightUniformBuffer = lightUniformBuffer;
     this.sphereUniformBuffer = sphereUniformBuffer;
+    this.shadowUniformBuffer = shadowUniformBuffer;
     this.tileTexture = tileTexture;
     this.tileSampler = tileSampler;
     this.skyTexture = skyTexture;
@@ -663,6 +664,13 @@ export class Water {
         }
         @binding(1) @group(0) var<uniform> sphere : SphereUniforms;
 
+        struct ShadowUniforms {
+            rim : f32,
+            sphere : f32,
+            ao : f32,
+        }
+        @binding(4) @group(0) var<uniform> shadows : ShadowUniforms;
+
         @binding(2) @group(0) var waterSampler : sampler;
         @binding(3) @group(0) var waterTexture : texture_2d<f32>;
 
@@ -723,9 +731,12 @@ export class Water {
           output.ray = ray;
           
           // Map to texture space
-          // "gl_Position = vec4(0.75 * (newPos.xz + refractedLight.xz / refractedLight.y), 0.0, 1.0);"
-          let projectedPos = 0.75 * (output.newPos.xz + refractedLight.xz / refractedLight.y);
-          output.position = vec4f(projectedPos, 0.0, 1.0);
+          // Adjusted to account for wall height (y) to align with pool.js sampling logic
+          // Original: "gl_Position = vec4(0.75 * (newPos.xz + refractedLight.xz / refractedLight.y), 0.0, 1.0);"
+          // This matches the original only at y = -1.0 (floor).
+          let projectedPos = 0.75 * (output.newPos.xz - output.newPos.y * refractedLight.xz / refractedLight.y);
+          // Flip Y because WebGPU UV origin is Top-Left (V increases down), but Clip Space Y increases Up.
+          output.position = vec4f(projectedPos.x, -projectedPos.y, 0.0, 1.0);
           
           return output;
         }
@@ -753,11 +764,13 @@ export class Water {
             shadow = 1.0 + (shadow - 1.0) / (0.05 + dist * 0.025);
             shadow = clamp(1.0 / (1.0 + exp(-shadow)), 0.0, 1.0);
             shadow = mix(1.0, shadow, clamp(dist * 2.0, 0.0, 1.0));
+            shadow = mix(1.0, shadow, shadows.sphere); // Apply Toggle
             
             // Rim shadow
             let poolHeight = 1.0;
             let t = intersectCube(newPos, -refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-            intensity *= 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (newPos.y - refractedLight.y * t.y - 2.0 / 12.0)));
+            let rimShadow = 1.0 / (1.0 + exp(-100.0 / (1.0 + 10.0 * (t.y - t.x)) * (newPos.y - refractedLight.y * t.y - 2.0 / 12.0)));
+            intensity *= mix(1.0, rimShadow, shadows.rim); // Apply Toggle
             
             return vec4f(intensity, shadow, 0.0, 1.0);
         }
@@ -811,7 +824,8 @@ export class Water {
             { binding: 0, resource: { buffer: this.lightUniformBuffer } },
             { binding: 1, resource: { buffer: this.sphereUniformBuffer } },
             { binding: 2, resource: this.sampler },
-            { binding: 3, resource: this.textureA.createView() }
+            { binding: 3, resource: this.textureA.createView() },
+            { binding: 4, resource: { buffer: this.shadowUniformBuffer } }
         ]
     });
 

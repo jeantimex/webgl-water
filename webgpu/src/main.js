@@ -1,4 +1,5 @@
 import { mat4, vec3 } from 'wgpu-matrix';
+import GUI from 'lil-gui';
 import { Pool } from './pool.js';
 import { Sphere } from './sphere.js';
 import { Water } from './water.js';
@@ -126,12 +127,46 @@ async function init() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
+  // Shadow Control Uniforms
+  const shadowUniformBuffer = device.createBuffer({
+    size: 16, // rim (f32), sphere (f32), ao (f32), padding
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  
+  const shadowParams = {
+      rimShadow: true,
+      sphereShadow: true,
+      poolAO: true,
+  };
+  
+  function updateShadowUniforms() {
+      const data = new Float32Array([
+          shadowParams.rimShadow ? 1.0 : 0.0,
+          shadowParams.sphereShadow ? 1.0 : 0.0,
+          shadowParams.poolAO ? 1.0 : 0.0,
+          0.0
+      ]);
+      device.queue.writeBuffer(shadowUniformBuffer, 0, data);
+  }
+  updateShadowUniforms();
+
+  const gui = new GUI();
+  const guiParams = {
+    showWater: true,
+  };
+  gui.add(guiParams, 'showWater').name('Show Water');
+  
+  const shadowFolder = gui.addFolder('Shadows');
+  shadowFolder.add(shadowParams, 'rimShadow').name('Rim Shadow').onChange(updateShadowUniforms);
+  shadowFolder.add(shadowParams, 'sphereShadow').name('Sphere Shadow').onChange(updateShadowUniforms);
+  shadowFolder.add(shadowParams, 'poolAO').name('Pool AO').onChange(updateShadowUniforms);
+
   // Create Objects
-  const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer);
+  const pool = new Pool(device, format, uniformBuffer, tileTexture, tileSampler, lightUniformBuffer, sphereUniformBuffer, shadowUniformBuffer);
   const sphere = new Sphere(device, format, uniformBuffer, lightUniformBuffer, sphereUniformBuffer);
   
   // Pass Skybox to Water
-  const water = new Water(device, 256, 256, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, tileTexture, tileSampler, skyTexture, skySampler);
+  const water = new Water(device, 256, 256, uniformBuffer, lightUniformBuffer, sphereUniformBuffer, shadowUniformBuffer, tileTexture, tileSampler, skyTexture, skySampler);
 
   // Initial Sphere Physics State
   let center = new Vector(-0.4, -0.75, 0.2);
@@ -359,7 +394,9 @@ async function init() {
 
     pool.render(passEncoder, water.textureA, water.sampler, water.causticsTexture);
     sphere.render(passEncoder, water.textureA, water.sampler, water.causticsTexture);
-    water.renderSurface(passEncoder);
+    if (guiParams.showWater) {
+      water.renderSurface(passEncoder);
+    }
     
     passEncoder.end();
 
