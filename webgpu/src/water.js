@@ -769,7 +769,7 @@ export class Water {
             // Rim shadow
             let poolHeight = 1.0;
             let t = intersectCube(newPos, -refractedLight, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-            let rimShadow = 1.0 / (1.0 + exp(-100.0 / (1.0 + 10.0 * (t.y - t.x)) * (newPos.y - refractedLight.y * t.y - 2.0 / 12.0)));
+            let rimShadow = 1.0 / (1.0 + exp(-200.0 / (1.0 + 10.0 * (t.y - t.x)) * (newPos.y - refractedLight.y * t.y - 2.0 / 12.0)));
             intensity *= mix(1.0, rimShadow, shadows.rim); // Apply Toggle
             
             return vec4f(intensity, shadow, 0.0, 1.0);
