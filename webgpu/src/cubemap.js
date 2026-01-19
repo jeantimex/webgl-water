@@ -24,7 +24,7 @@ export class Cubemap {
 
     for (let i = 0; i < 6; i++) {
       this.device.queue.copyExternalImageToTexture(
-        { source: images[i], flipY: false },
+        { source: images[i], flipY: true },
         { texture: this.texture, origin: [0, 0, i] },
         { width, height }
       );
